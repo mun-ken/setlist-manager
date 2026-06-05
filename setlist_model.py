@@ -8,7 +8,7 @@ Schema v3 (current)
     {
       "name": str,
       "library": [{"name", "key", "duration", "notes"}, ...],
-      "setlists": [{"name", "songs": [str, ...]}, ...],
+      "setlists": [{"name", "songs": [str, ...], "modified_at": ISO-string}, ...],
       "active_setlist": int
     }, ...
   ],
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -64,7 +64,17 @@ def new_song(name, duration="", key="", notes="") -> Dict:
 
 
 def new_setlist(name="Ny setliste") -> Dict:
-    return {"name": (name or "Setliste").strip() or "Setliste", "songs": []}
+    return {
+        "name": (name or "Setliste").strip() or "Setliste",
+        "songs": [],
+        # ISO 8601 timestamp (UTC) — opdateres hver gang setlisten ændres
+        "modified_at": _now_iso(),
+    }
+
+
+def _now_iso() -> str:
+    """Aktuel tid som ISO 8601 string i UTC."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def new_band(name="Mit band") -> Dict:
@@ -162,6 +172,46 @@ def format_seconds(secs) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+# Danske månedsnavne — bruges af format_modified_at()
+_DK_MONTHS = (
+    "januar", "februar", "marts", "april", "maj", "juni",
+    "juli", "august", "september", "oktober", "november", "december",
+)
+
+
+def format_modified_at(iso_string: str, now: Optional[datetime] = None) -> str:
+    """Lav et ISO 8601 timestamp om til pænt dansk format.
+
+    Eksempler:
+        ""                        → ""           (ukendt)
+        "2026-06-05T22:10:00+00:00" hvis lige nu → "i dag kl. 22:10"
+        "2026-06-04T22:10:00+00:00"  → "i går kl. 22:10"
+        "2026-05-30T10:00:00+00:00"  → "30. maj kl. 10:00"
+        "2024-03-15T10:00:00+00:00"  → "15. marts 2024 kl. 10:00"
+    """
+    if not iso_string:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_string)
+    except (TypeError, ValueError):
+        return ""
+    # Konverter til lokal tid hvis vi har timezone-info
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    now = now or datetime.now(dt.tzinfo) if dt.tzinfo else (now or datetime.now())
+    today = now.date()
+    when = dt.date()
+    time_part = f"kl. {dt:%H:%M}"
+    if when == today:
+        return f"i dag {time_part}"
+    if (today - when).days == 1:
+        return f"i går {time_part}"
+    month = _DK_MONTHS[dt.month - 1]
+    if dt.year == now.year:
+        return f"{dt.day}. {month} {time_part}"
+    return f"{dt.day}. {month} {dt.year} {time_part}"
 
 
 # ---------------------------------------------------------------------------
@@ -288,21 +338,28 @@ class SetlistModel:
         song["duration"] = (duration or "").strip()
         song["notes"] = (notes or "").strip()
         if new_name != original_name:
-            for sl in self.setlists:
-                sl["songs"] = [new_name if n == original_name else n for n in sl["songs"]]
+            for sl_idx, sl in enumerate(self.setlists):
+                if any(n == original_name for n in sl["songs"] if isinstance(n, str)):
+                    sl["songs"] = [new_name if n == original_name else n for n in sl["songs"]]
+                    self.touch_setlist(sl_idx)
         return True
 
     def remove_song_by_index(self, idx: int) -> None:
         if 0 <= idx < len(self.library):
             removed = self.library.pop(idx)
             removed_name = removed["name"]
-            for sl in self.setlists:
+            for sl_idx, sl in enumerate(self.setlists):
+                before = len(sl["songs"])
                 sl["songs"] = [n for n in sl["songs"] if n != removed_name]
+                if len(sl["songs"]) != before:
+                    self.touch_setlist(sl_idx)
 
     def clear_library(self) -> None:
         self.library.clear()
-        for sl in self.setlists:
-            sl["songs"] = []
+        for sl_idx, sl in enumerate(self.setlists):
+            if sl["songs"]:
+                sl["songs"] = []
+                self.touch_setlist(sl_idx)
 
     # ------------------------------------------------------------------
     # Setlists (within current band)
@@ -311,6 +368,36 @@ class SetlistModel:
         self.setlists.append(new_setlist(name))
         self.active_setlist = len(self.setlists) - 1
         return self.active_setlist
+
+    def duplicate_setlist(self, idx: int, new_name: Optional[str] = None) -> int:
+        """Lav en kopi af setlisten ved index. Returnerer index for den nye
+        kopi, eller -1 hvis index er ugyldigt.
+
+        Sange er strings (immutable), markører er dicts (skal deep-kopieres).
+        Den nye setliste får automatisk navn "<original> (kopi)" hvis
+        ``new_name`` ikke er givet, og bliver den aktive setliste.
+        """
+        if not (0 <= idx < len(self.setlists)):
+            return -1
+        src = self.setlists[idx]
+        # Deep-copy songs: strings er immutable, markører (dicts) skal kopieres
+        copied_songs = []
+        for item in src.get("songs", []):
+            if isinstance(item, dict):
+                copied_songs.append(dict(item))  # shallow copy af dict er nok
+            else:
+                copied_songs.append(item)
+        copy_name = (new_name or "").strip() or f"{src['name']} (kopi)"
+        new_sl = {
+            "name": copy_name,
+            "songs": copied_songs,
+            "modified_at": _now_iso(),
+        }
+        # Indsæt lige efter originalen så de står ved siden af hinanden
+        insert_at = idx + 1
+        self.setlists.insert(insert_at, new_sl)
+        self.active_setlist = insert_at
+        return insert_at
 
     def delete_setlist(self, idx: int) -> bool:
         if 0 <= idx < len(self.setlists) and len(self.setlists) > 1:
@@ -326,12 +413,31 @@ class SetlistModel:
             return False
         if 0 <= idx < len(self.setlists):
             self.setlists[idx]["name"] = name
+            self.setlists[idx]["modified_at"] = _now_iso()
             return True
         return False
 
     def set_active(self, idx: int) -> None:
         if 0 <= idx < len(self.setlists):
             self.active_setlist = idx
+
+    def touch_setlist(self, idx: Optional[int] = None) -> None:
+        """Marker en setliste som ændret nu (opdaterer modified_at).
+        Hvis idx er None bruges den aktive setliste."""
+        if idx is None:
+            idx = self.active_setlist
+        if 0 <= idx < len(self.setlists):
+            self.setlists[idx]["modified_at"] = _now_iso()
+
+    def get_setlist_modified_at(self, idx: Optional[int] = None) -> str:
+        """Returnerer ISO-timestamp for hvornår setlisten sidst blev ændret,
+        eller tom string hvis den aldrig er blevet markeret som ændret
+        (typisk for setlister importeret fra gamle gem-filer)."""
+        if idx is None:
+            idx = self.active_setlist
+        if 0 <= idx < len(self.setlists):
+            return str(self.setlists[idx].get("modified_at", ""))
+        return ""
 
     # ------------------------------------------------------------------
     # Songs in current setlist
@@ -351,6 +457,7 @@ class SetlistModel:
         if self.is_in_current_setlist(name):
             return False
         self.current_setlist["songs"].append(name)
+        self.touch_setlist()
         return True
 
     def add_marker_to_setlist(self, label: str, position: Optional[int] = None) -> int:
@@ -364,10 +471,12 @@ class SetlistModel:
         item = make_marker(label)
         if position is None or position >= len(songs):
             songs.append(item)
+            self.touch_setlist()
             return len(songs) - 1
         if position < 0:
             position = 0
         songs.insert(position, item)
+        self.touch_setlist()
         return position
 
     def update_marker_label(self, idx: int, label: str) -> bool:
@@ -381,17 +490,20 @@ class SetlistModel:
         if not label:
             return False
         songs[idx] = make_marker(label)
+        self.touch_setlist()
         return True
 
     def remove_from_setlist_by_index(self, idx: int) -> None:
         songs = self.current_setlist["songs"]
         if 0 <= idx < len(songs):
             songs.pop(idx)
+            self.touch_setlist()
 
     def move_up(self, idx: int) -> int:
         songs = self.current_setlist["songs"]
         if 1 <= idx < len(songs):
             songs[idx - 1], songs[idx] = songs[idx], songs[idx - 1]
+            self.touch_setlist()
             return idx - 1
         return idx
 
@@ -399,6 +511,7 @@ class SetlistModel:
         songs = self.current_setlist["songs"]
         if 0 <= idx < len(songs) - 1:
             songs[idx + 1], songs[idx] = songs[idx], songs[idx + 1]
+            self.touch_setlist()
             return idx + 1
         return idx
 
@@ -408,10 +521,13 @@ class SetlistModel:
             return src_idx
         item = songs.pop(src_idx)
         songs.insert(dst_idx, item)
+        if src_idx != dst_idx:
+            self.touch_setlist()
         return dst_idx
 
     def clear_current_setlist(self) -> None:
         self.current_setlist["songs"] = []
+        self.touch_setlist()
 
     def current_setlist_seconds(self) -> int:
         total = 0
@@ -546,10 +662,16 @@ class SetlistModel:
         for sl in raw_setlists:
             if not isinstance(sl, dict):
                 continue
+            # modified_at fra gamle filer: hvis det mangler, sæt tom string
+            # (vises som "ukendt" i UI) — vi gætter ikke en falsk dato.
+            modified = sl.get("modified_at", "")
+            if not isinstance(modified, str):
+                modified = ""
             setlists.append(
                 {
                     "name": str(sl.get("name", "Setliste")).strip() or "Setliste",
                     "songs": cls._normalize_setlist_items(sl.get("songs", [])),
+                    "modified_at": modified,
                 }
             )
         if not setlists:

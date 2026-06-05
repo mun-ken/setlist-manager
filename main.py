@@ -30,6 +30,7 @@ from setlist_model import (
     SetlistModel,
     default_autosave_path,
     default_print_options,
+    format_modified_at,
     format_seconds,
     is_marker_item,
     item_marker_label,
@@ -1431,6 +1432,7 @@ class SetlistApp:
         self.setlist_combo.pack(side=tk.LEFT, padx=(0, 6))
         self.setlist_combo.bind("<<ComboboxSelected>>", self._on_setlist_changed)
         ttk.Button(row2, text="Ny setliste", command=self.add_setlist).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="📋 Kopiér", command=self.duplicate_setlist).pack(side=tk.LEFT, padx=2)
         ttk.Button(row2, text="Omdøb", command=self.rename_setlist).pack(side=tk.LEFT, padx=2)
         ttk.Button(row2, text="Slet", command=self.delete_setlist).pack(side=tk.LEFT, padx=2)
 
@@ -1655,7 +1657,39 @@ class SetlistApp:
             self.model.add_setlist(name.strip())
             self._refresh_setlist_combo()
             self.refresh_setlist_view()
+            self.refresh_library_view()  # opdater grå markering
             self._schedule_autosave()
+
+    def duplicate_setlist(self) -> None:
+        """Lav en kopi af den aktive setliste (alle sange + markører).
+        Den nye kopi får navnet "<original> (kopi)" og bliver aktiv."""
+        idx = self.model.active_setlist
+        current = self.model.setlists[idx]
+        suggested = f"{current['name']} (kopi)"
+        name = simpledialog.askstring(
+            "Kopiér setliste",
+            f"Kopiér \"{current['name']}\".\n\nNavn på den nye kopi:",
+            parent=self.root,
+            initialvalue=suggested,
+        )
+        if not name or not name.strip():
+            return
+        song_count = sum(1 for it in current["songs"] if not is_marker_item(it))
+        new_idx = self.model.duplicate_setlist(idx, name.strip())
+        if new_idx < 0:
+            messagebox.showerror(
+                "Fejl", "Kunne ikke kopiere setlisten.", parent=self.root
+            )
+            return
+        self._refresh_setlist_combo()
+        self.refresh_setlist_view()
+        self.refresh_library_view()  # opdater grå markering
+        self._schedule_autosave()
+        messagebox.showinfo(
+            "Kopiéret",
+            f'Kopi oprettet: "{name.strip()}" med {song_count} sang(e).',
+            parent=self.root,
+        )
 
     def rename_setlist(self) -> None:
         idx = self.model.active_setlist
@@ -1666,6 +1700,7 @@ class SetlistApp:
         if name and name.strip():
             self.model.rename_setlist(idx, name.strip())
             self._refresh_setlist_combo()
+            self.refresh_setlist_view()  # opdater status-bar med ny dato
             self._schedule_autosave()
 
     def delete_setlist(self) -> None:
@@ -2024,6 +2059,14 @@ class SetlistApp:
             text += f"  ·  {markers} markør{'er' if markers != 1 else ''}"
         if secs:
             text += f"  ·  {format_seconds(secs)}"
+        # "Sidst ændret"-tidspunkt — kun hvis vi har det (nye setlister får
+        # det automatisk; gamle setlister fra v1/v2 har ikke noget før de
+        # bliver ændret første gang)
+        modified_iso = self.model.get_setlist_modified_at()
+        if modified_iso:
+            modified_human = format_modified_at(modified_iso)
+            if modified_human:
+                text += f"   ·   ✏️ Sidst ændret: {modified_human}"
         self.status_var.set(text)
 
     # ------------------------------------------------------------------

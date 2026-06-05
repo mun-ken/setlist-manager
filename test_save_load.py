@@ -1007,6 +1007,252 @@ def test_regression_notes_persist_after_edit() -> None:
 
 
 # ===========================================================================
+# Feature: Kopiér setliste + "Sidst ændret" timestamp (juni 2026)
+# ===========================================================================
+def test_duplicate_setlist_basic() -> None:
+    """Kopiér setliste skal lave en uafhængig kopi med alle sange + markører."""
+    m = SetlistModel()
+    m.add_song("Sang A", duration="3:00", key="C")
+    m.add_song("Sang B", duration="4:00", key="G")
+    m.add_to_setlist_by_index(0)
+    m.add_marker_to_setlist("EKSTRA-NUMMER")
+    m.add_to_setlist_by_index(1)
+
+    assert len(m.setlists) == 1
+    new_idx = m.duplicate_setlist(0, "Mit gig 2")
+    assert new_idx == 1
+    assert len(m.setlists) == 2
+    assert m.active_setlist == 1  # kopien er aktiv
+    assert m.current_setlist["name"] == "Mit gig 2"
+    # Sange + markører skal være kopieret
+    assert len(m.current_setlist["songs"]) == 3
+    assert m.current_setlist["songs"][0] == "Sang A"
+    assert m.current_setlist["songs"][1] == {"marker": "EKSTRA-NUMMER"}
+    assert m.current_setlist["songs"][2] == "Sang B"
+    print("  duplicate_setlist basic OK")
+
+
+def test_duplicate_setlist_is_independent() -> None:
+    """Ændringer på kopien må IKKE påvirke originalen (deep copy)."""
+    m = SetlistModel()
+    m.add_song("A"); m.add_song("B"); m.add_song("C")
+    m.add_to_setlist_by_index(0)
+    m.add_marker_to_setlist("PAUSE")
+
+    m.duplicate_setlist(0)
+    # Vi er nu på kopien — tilføj noget
+    m.add_to_setlist_by_index(1)
+    m.add_to_setlist_by_index(2)
+    # Skift tilbage til originalen
+    m.set_active(0)
+    assert len(m.current_setlist["songs"]) == 2  # Sang A + markør
+    # Skift til kopien igen
+    m.set_active(1)
+    assert len(m.current_setlist["songs"]) == 4  # + Sang B + Sang C
+    # Modificer markøren i kopien — originalen må ikke ændres
+    m.update_marker_label(1, "ANDET")
+    assert m.current_setlist["songs"][1] == {"marker": "ANDET"}
+    m.set_active(0)
+    assert m.current_setlist["songs"][1] == {"marker": "PAUSE"}, \
+        "Markøren i originalen blev ændret — kopien er ikke uafhængig!"
+    print("  duplicate_setlist is independent OK")
+
+
+def test_duplicate_setlist_default_name() -> None:
+    """Hvis intet navn er givet → '<original> (kopi)'."""
+    m = SetlistModel()
+    m.rename_setlist(0, "Sommerfest 2026")
+    new_idx = m.duplicate_setlist(0)
+    assert m.setlists[new_idx]["name"] == "Sommerfest 2026 (kopi)"
+    print("  duplicate_setlist default name OK")
+
+
+def test_duplicate_setlist_invalid_index() -> None:
+    """Ugyldigt index → returnér -1, ingen ændring."""
+    m = SetlistModel()
+    assert m.duplicate_setlist(99) == -1
+    assert m.duplicate_setlist(-1) == -1
+    assert len(m.setlists) == 1  # uændret
+    print("  duplicate_setlist invalid index OK")
+
+
+def test_duplicate_setlist_persists_to_disk() -> None:
+    """Kopier overlever save/load."""
+    import tempfile, pathlib
+    m = SetlistModel()
+    m.add_song("A"); m.add_song("B")
+    m.add_to_setlist_by_index(0)
+    m.add_to_setlist_by_index(1)
+    m.duplicate_setlist(0, "Kopi-test")
+
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "t.json"
+        m.save_to_path(str(p))
+        m2 = SetlistModel()
+        m2.load_from_path(str(p))
+        assert len(m2.setlists) == 2
+        assert m2.setlists[0]["name"] == "Min første setliste"
+        assert m2.setlists[1]["name"] == "Kopi-test"
+        assert m2.setlists[1]["songs"] == ["A", "B"]
+    print("  duplicate_setlist persists to disk OK")
+
+
+def test_setlist_has_modified_at_field() -> None:
+    """Nye setlister skal have modified_at automatisk."""
+    m = SetlistModel()
+    assert "modified_at" in m.current_setlist
+    assert m.current_setlist["modified_at"]  # ikke tom
+    # Parsbar som ISO 8601
+    from datetime import datetime
+    dt = datetime.fromisoformat(m.current_setlist["modified_at"])
+    assert dt.year >= 2026
+    print("  setlist has modified_at field OK")
+
+
+def test_touch_setlist_called_on_mutations() -> None:
+    """Alle mutating operations skal opdatere modified_at."""
+    import time
+    m = SetlistModel()
+    m.add_song("A")
+    m.add_song("B")
+    initial_modified = m.get_setlist_modified_at()
+    assert initial_modified
+
+    # add_to_setlist_by_index → touch
+    time.sleep(1.01)
+    m.add_to_setlist_by_index(0)
+    after_add = m.get_setlist_modified_at()
+    assert after_add > initial_modified, "add_to_setlist_by_index skal touche"
+
+    # add_marker_to_setlist → touch
+    time.sleep(1.01)
+    m.add_marker_to_setlist("PAUSE")
+    after_marker = m.get_setlist_modified_at()
+    assert after_marker > after_add, "add_marker_to_setlist skal touche"
+
+    # move_down → touch (hvis der faktisk er ændring)
+    time.sleep(1.01)
+    m.add_to_setlist_by_index(1)
+    before_move = m.get_setlist_modified_at()
+    time.sleep(1.01)
+    m.move_up(2)
+    assert m.get_setlist_modified_at() > before_move, "move_up skal touche"
+
+    # remove_from_setlist_by_index → touch
+    time.sleep(1.01)
+    before_remove = m.get_setlist_modified_at()
+    m.remove_from_setlist_by_index(0)
+    assert m.get_setlist_modified_at() > before_remove, "remove skal touche"
+
+    # rename_setlist → touch
+    time.sleep(1.01)
+    before_rename = m.get_setlist_modified_at()
+    m.rename_setlist(0, "Nyt navn")
+    assert m.get_setlist_modified_at() > before_rename, "rename skal touche"
+
+    # clear_current_setlist → touch
+    time.sleep(1.01)
+    before_clear = m.get_setlist_modified_at()
+    m.clear_current_setlist()
+    assert m.get_setlist_modified_at() > before_clear, "clear skal touche"
+    print("  touch_setlist called on all mutations OK")
+
+
+def test_set_active_does_NOT_touch() -> None:
+    """At skifte mellem setlister må IKKE opdatere modified_at."""
+    import time
+    m = SetlistModel()
+    m.add_song("A")
+    m.add_to_setlist_by_index(0)
+    m.add_setlist("Sæt 2")  # gør Sæt 2 aktiv
+    original_modified_sl0 = m.setlists[0]["modified_at"]
+
+    time.sleep(0.1)
+    m.set_active(0)  # skift tilbage til den første
+    time.sleep(0.1)
+    m.set_active(1)  # og tilbage igen
+    # modified_at på sl 0 skal være uændret (vi rørte ikke indholdet)
+    assert m.setlists[0]["modified_at"] == original_modified_sl0
+    print("  set_active does NOT touch modified_at OK")
+
+
+def test_modified_at_persists_to_disk() -> None:
+    """modified_at skal overleve save/load uændret."""
+    import tempfile, pathlib
+    m = SetlistModel()
+    m.add_song("A")
+    m.add_to_setlist_by_index(0)
+    saved_modified = m.get_setlist_modified_at()
+
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "t.json"
+        m.save_to_path(str(p))
+        m2 = SetlistModel()
+        m2.load_from_path(str(p))
+        assert m2.get_setlist_modified_at() == saved_modified
+    print("  modified_at persists to disk OK")
+
+
+def test_modified_at_migrates_from_old_files() -> None:
+    """Setlister fra v1/v2 (uden modified_at) skal få tom string,
+    så vi ikke gætter en falsk dato. UI viser bare ingen 'Sidst ændret:'."""
+    import tempfile, pathlib, json
+    # Lav en v2-fil uden modified_at
+    old_data = {
+        "schema_version": 2,
+        "library": [{"name": "Sang A", "duration": "3:00", "key": "C", "notes": ""}],
+        "setlists": [{"name": "Gammel", "songs": ["Sang A"]}],  # INGEN modified_at
+        "active_setlist": 0,
+    }
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "old.json"
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(old_data, f)
+        m = SetlistModel()
+        m.load_from_path(str(p))
+        assert m.get_setlist_modified_at() == ""
+        # Når brugeren ændrer noget skal den så få en timestamp
+        m.add_marker_to_setlist("PAUSE")
+        assert m.get_setlist_modified_at() != ""
+    print("  modified_at migrates gracefully from old files OK")
+
+
+def test_format_modified_at_human_readable() -> None:
+    """format_modified_at skal returnere pænt dansk format."""
+    from datetime import datetime, timezone, timedelta
+    from setlist_model import format_modified_at
+
+    # Tom string → tom string
+    assert format_modified_at("") == ""
+    assert format_modified_at("ikke-en-dato") == ""
+
+    # I dag
+    now = datetime(2026, 6, 5, 22, 15, tzinfo=timezone.utc)
+    today_iso = datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc).isoformat()
+    result = format_modified_at(today_iso, now=now)
+    assert "i dag" in result
+    assert "kl." in result
+
+    # I går
+    yesterday_iso = datetime(2026, 6, 4, 14, 30, tzinfo=timezone.utc).isoformat()
+    result = format_modified_at(yesterday_iso, now=now)
+    assert "i går" in result
+
+    # Tidligere på året
+    old_iso = datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc).isoformat()
+    result = format_modified_at(old_iso, now=now)
+    assert "marts" in result
+    assert "2026" not in result  # samme år → ingen år
+
+    # Sidste år
+    last_year_iso = datetime(2024, 3, 15, 10, 0, tzinfo=timezone.utc).isoformat()
+    result = format_modified_at(last_year_iso, now=now)
+    assert "marts" in result
+    assert "2024" in result
+    print("  format_modified_at produces human Danish text OK")
+
+
+# ===========================================================================
 # Updater (online opdaterings-tjek) — Fase 14
 # Bruger mock-data så testene aldrig rør GitHub
 # ===========================================================================
@@ -1307,6 +1553,17 @@ def run_all() -> None:
         test_regression_can_add_song_after_marker,
         test_regression_notes_field_used_in_html_print,
         test_regression_notes_persist_after_edit,
+        test_duplicate_setlist_basic,
+        test_duplicate_setlist_is_independent,
+        test_duplicate_setlist_default_name,
+        test_duplicate_setlist_invalid_index,
+        test_duplicate_setlist_persists_to_disk,
+        test_setlist_has_modified_at_field,
+        test_touch_setlist_called_on_mutations,
+        test_set_active_does_NOT_touch,
+        test_modified_at_persists_to_disk,
+        test_modified_at_migrates_from_old_files,
+        test_format_modified_at_human_readable,
         test_updater_parse_version,
         test_updater_is_newer,
         test_updater_parse_release_full,
