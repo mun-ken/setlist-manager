@@ -1,0 +1,16 @@
+# Build / runtime artifacts
+build/
+dist/
+Output/
+*.spec.bak
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Generated icon (re-created on every build by make_icon.py)
+assets/app.ico
+
+# Editor
+.vscode/
+.idea/

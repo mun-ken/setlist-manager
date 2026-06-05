@@ -1,0 +1,116 @@
+name: Build Windows Installer
+
+# Builds SetlistManager.exe + SetlistManagerSetup.exe og uploader dem.
+#
+# Triggere:
+#   - Hvert push til main/master      -> bygger som "artifact" (test-build)
+#   - Push af tag i format v1.2.3     -> bygger OG opretter GitHub Release
+#                                         med installeren som download
+#   - Manuel kørsel fra Actions-tab
+#
+# Sådan udgiver du en ny version:
+#   1. Ret APP_VERSION i version.py (fx "1.2.0")
+#   2. git add version.py && git commit -m "Bump til 1.2.0"
+#   3. git tag v1.2.0
+#   4. git push && git push --tags
+#   -> Workflow kører, opretter Release med SetlistManagerSetup.exe.
+#   -> Brugere får besked om opdateringen næste gang de starter programmet.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']            # trigger også når der pushes en tag som v1.2.3
+  workflow_dispatch:
+
+permissions:
+  contents: write           # kræves for at oprette Releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python test_save_load.py
+
+      - name: Read APP_VERSION from version.py
+        id: read_version
+        shell: pwsh
+        run: |
+          $v = python -c "from version import APP_VERSION; print(APP_VERSION)"
+          echo "APP_VERSION=$v" >> $env:GITHUB_ENV
+          echo "version=$v"     >> $env:GITHUB_OUTPUT
+          Write-Host "App version: $v"
+
+      - name: Sanity-check tag matches APP_VERSION (only on tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          if ($tag -ne $env:APP_VERSION) {
+            Write-Error "Tag ($tag) matcher ikke APP_VERSION ($env:APP_VERSION). Bump version.py inden du tagger."
+            exit 1
+          }
+          Write-Host "Tag OK ($tag = $env:APP_VERSION)"
+
+      - name: Generate application icon
+        run: python make_icon.py
+
+      - name: Build standalone EXE with PyInstaller
+        run: pyinstaller setlist.spec --noconfirm
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer with Inno Setup
+        shell: pwsh
+        run: |
+          # APP_VERSION er allerede sat i env og bliver læst af installer.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          # Omdøb output så versionen er en del af filnavnet (nemmere at se hvad man downloader)
+          $src = "Output\SetlistManagerSetup.exe"
+          $dst = "Output\SetlistManagerSetup-$env:APP_VERSION.exe"
+          if (Test-Path $src) { Copy-Item $src $dst }
+
+      - name: Upload build artifacts (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SetlistManager-${{ env.APP_VERSION }}-Windows
+          path: |
+            dist/SetlistManager.exe
+            Output/SetlistManagerSetup.exe
+            Output/SetlistManagerSetup-*.exe
+          if-no-files-found: error
+
+      # ----------------------------------------------------------------
+      # Kun ved tag push: opret GitHub Release og upload installeren.
+      # Det er HER auto-update-tjekket henter den nye version fra.
+      # ----------------------------------------------------------------
+      - name: Create GitHub Release (only on tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Setlist Manager ${{ github.ref_name }}"
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            Output/SetlistManagerSetup.exe
+            Output/SetlistManagerSetup-${{ env.APP_VERSION }}.exe
+            dist/SetlistManager.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

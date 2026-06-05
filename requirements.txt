@@ -1,0 +1,4 @@
+# Runtime: Tkinter ships with the official Python installer on Windows.
+# Build/packaging dependencies:
+pyinstaller>=6.0
+Pillow>=10.0
