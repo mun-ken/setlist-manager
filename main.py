@@ -536,6 +536,24 @@ class PrintDialog(tk.Toplevel):
                 font=("Helvetica", max(7, sizes["table"] - 2), "italic"),
             ).pack(anchor=tk.W, pady=(4, 0))
 
+        # Hint hvis brugeren har slået "Noter" til, men ingen sange har noter
+        # (typisk efter import fra MusicBrainz). Så ved de hvorfor de ikke
+        # ser noget — og hvordan de tilføjer noter.
+        if opts.get("show_notes", True):
+            song_items = [it for it in items if not is_marker_item(it)]
+            has_any_notes = any(
+                (self.model.get_song(item_song_name(it)) or {}).get("notes")
+                for it in song_items
+            )
+            if song_items and not has_any_notes:
+                tk.Label(
+                    self._songs_frame, bg="white", fg="#b88a00",
+                    text="💡  Ingen sange har noter endnu — dobbeltklik en sang "
+                         "i setlisten for at tilføje noter (fx 'capo 2', 'A-bro').",
+                    font=("Helvetica", max(8, sizes["table"] - 2), "italic"),
+                    wraplength=340, justify=tk.LEFT,
+                ).pack(anchor=tk.W, pady=(6, 0), padx=2)
+
     # ------------------------------------------------------------------
     # Collect / OK / browser preview
     # ------------------------------------------------------------------
@@ -698,7 +716,16 @@ class ImportFromWebDialog(tk.Toplevel):
         self.transient(parent)
         self.app = app
         self.model = app.model
-        self.geometry("820x600")
+
+        # Tilpas størrelsen til skærmen så bunden (Importér-knappen) altid
+        # er synlig — selv på små Windows-VM'er / laptops med lav opløsning.
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = min(820, max(640, sw - 100))
+        h = min(620, max(480, sh - 120))
+        self.geometry(f"{w}x{h}")
+        self.minsize(560, 440)
+        self.resizable(True, True)
 
         self._artists: list[dict] = []
         self._tracks: list[dict] = []           # ALLE sange fra MusicBrainz
@@ -710,6 +737,27 @@ class ImportFromWebDialog(tk.Toplevel):
 
         outer = ttk.Frame(self, padding=12)
         outer.pack(fill=tk.BOTH, expand=True)
+
+        # VIGTIGT: bottom-knapperne (Importér, Vælg alle, ...) pakkes FØRST
+        # med side=BOTTOM så de altid er synlige, uanset hvor lille vinduet
+        # bliver. Resten af layoutet får så plads ovenover, og sangsliste-
+        # boksen skrumper i stedet for at skjule Importér-knappen.
+        bottom = ttk.Frame(outer)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(bottom, textvariable=self.status_var, foreground="#555").pack(side=tk.LEFT)
+        self.import_btn = ttk.Button(
+            bottom, text="Importér valgte sange  ✓", command=self._do_import, state=tk.DISABLED
+        )
+        self.import_btn.pack(side=tk.RIGHT)
+        self.select_none_btn = ttk.Button(
+            bottom, text="Vælg ingen", command=lambda: self._set_all_tracks(False), state=tk.DISABLED
+        )
+        self.select_none_btn.pack(side=tk.RIGHT, padx=(0, 4))
+        self.select_all_btn = ttk.Button(
+            bottom, text="Vælg alle", command=lambda: self._set_all_tracks(True), state=tk.DISABLED
+        )
+        self.select_all_btn.pack(side=tk.RIGHT, padx=(0, 4))
 
         # --- Trin 1: Søg ---
         ttk.Label(
@@ -800,25 +848,6 @@ class ImportFromWebDialog(tk.Toplevel):
         self.tracks_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         self.tracks_canvas.bind_all("<Button-4>", lambda e: self.tracks_canvas.yview_scroll(-3, "units"))
         self.tracks_canvas.bind_all("<Button-5>", lambda e: self.tracks_canvas.yview_scroll(3, "units"))
-
-        # --- Bund: status + import ---
-        bottom = ttk.Frame(outer)
-        bottom.pack(fill=tk.X, pady=(10, 0))
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(bottom, textvariable=self.status_var, foreground="#555").pack(side=tk.LEFT)
-
-        self.import_btn = ttk.Button(
-            bottom, text="Importér valgte sange  ✓", command=self._do_import, state=tk.DISABLED
-        )
-        self.import_btn.pack(side=tk.RIGHT)
-        self.select_none_btn = ttk.Button(
-            bottom, text="Vælg ingen", command=lambda: self._set_all_tracks(False), state=tk.DISABLED
-        )
-        self.select_none_btn.pack(side=tk.RIGHT, padx=(0, 4))
-        self.select_all_btn = ttk.Button(
-            bottom, text="Vælg alle", command=lambda: self._set_all_tracks(True), state=tk.DISABLED
-        )
-        self.select_all_btn.pack(side=tk.RIGHT, padx=(0, 4))
 
         self.bind("<Escape>", lambda e: self._on_close())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1825,7 +1854,8 @@ class SetlistApp:
             self.add_marker_to_setlist(label.strip())
 
     def _on_setlist_double_click(self) -> None:
-        """Dobbeltklik på en markør → rediger den. På en sang → ingenting."""
+        """Dobbeltklik på en markør → rediger label.
+        Dobbeltklik på en sang → åbn Rediger-dialog (god til at tilføje noter)."""
         sel = self.set_listbox.curselection()
         if not sel:
             return
@@ -1833,20 +1863,42 @@ class SetlistApp:
         items = self.model.current_setlist["songs"]
         if not (0 <= idx < len(items)):
             return
-        if not is_marker_item(items[idx]):
-            return  # almindelige sange redigeres fra biblioteket
-        current = item_marker_label(items[idx])
-        new_label = simpledialog.askstring(
-            "Rediger markør",
-            "Ny tekst:",
-            parent=self.root,
-            initialvalue=current,
-        )
-        if new_label and new_label.strip():
-            self.model.update_marker_label(idx, new_label.strip())
-            self.refresh_setlist_view()
-            self.set_listbox.selection_set(idx)
-            self._schedule_autosave()
+        if is_marker_item(items[idx]):
+            # Rediger markør
+            current = item_marker_label(items[idx])
+            new_label = simpledialog.askstring(
+                "Rediger markør",
+                "Ny tekst:",
+                parent=self.root,
+                initialvalue=current,
+            )
+            if new_label and new_label.strip():
+                self.model.update_marker_label(idx, new_label.strip())
+                self.refresh_setlist_view()
+                self.set_listbox.selection_set(idx)
+                self._schedule_autosave()
+            return
+
+        # Sang — åbn Rediger-dialog så man let kan tilføje/ændre noter
+        name = item_song_name(items[idx])
+        song = self.model.get_song(name)
+        if not song:
+            return
+        dlg = SongDialog(self.root, title=f"Rediger sang: {name}", initial=song)
+        if dlg.result:
+            r = dlg.result
+            ok = self.model.update_song(
+                song["name"], r["name"], r["duration"], r["key"], r["notes"]
+            )
+            if not ok:
+                messagebox.showerror(
+                    "Fejl",
+                    "Kunne ikke gemme — findes der allerede en sang med samme navn?",
+                    parent=self.root,
+                )
+            else:
+                self.refresh_all()
+                self._schedule_autosave()
 
     # ------------------------------------------------------------------
     # Drag and drop in the setlist
@@ -1945,13 +1997,24 @@ class SetlistApp:
                     selectforeground="#fff", selectbackground="#b88a00",
                 )
             else:
-                # Almindelig sang
+                # Almindelig sang — vis nummer, navn, toneart/længde
+                # og en lille tekst-snippet af noter (hvis der er nogen).
                 song_num += 1
                 name = item_song_name(item)
                 song = self.model.get_song(name) or new_song(name)
                 extras = [x for x in (song["key"], song["duration"]) if x]
                 suffix = f"   ({' · '.join(extras)})" if extras else ""
-                self.set_listbox.insert(tk.END, f"{song_num:>2}.  {song['name']}{suffix}")
+                # Noter som ekstra suffix — gør \n til ' · ' og forkort
+                notes = (song.get("notes") or "").strip()
+                notes_suffix = ""
+                if notes:
+                    one_line = notes.replace("\n", " · ")
+                    if len(one_line) > 50:
+                        one_line = one_line[:47] + "…"
+                    notes_suffix = f"   💬 {one_line}"
+                self.set_listbox.insert(
+                    tk.END, f"{song_num:>2}.  {song['name']}{suffix}{notes_suffix}"
+                )
 
         count = self.model.current_setlist_song_count()
         markers = sum(1 for it in self.model.current_setlist["songs"] if is_marker_item(it))

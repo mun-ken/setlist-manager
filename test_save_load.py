@@ -972,6 +972,40 @@ def test_regression_notes_field_used_in_html_print() -> None:
     print("  regression: notes field renders in HTML print OK")
 
 
+def test_regression_notes_persist_after_edit() -> None:
+    """Bug: efter dobbeltklik-redigering af en sang i setlisten,
+    skal noterne stadig være gemt korrekt.
+    Test simulerer det fulde flow: add → addto setlist → update → reload.
+    """
+    import tempfile, pathlib
+    m = SetlistModel()
+    m.add_song("Sang A", duration="3:00", key="C")
+    m.add_to_setlist_by_index(0)
+    # Brugeren dobbeltklikker → ændrer noter
+    ok = m.update_song(
+        original_name="Sang A",
+        name="Sang A",
+        duration="3:00",
+        key="C",
+        notes="Capo 3 · spil softere på outro",
+    )
+    assert ok
+    # Verificer at noterne nu er på sangen
+    assert m.get_song("Sang A")["notes"] == "Capo 3 · spil softere på outro"
+    # Verificer at noterne overlever save/load
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "test.json"
+        m.save_to_path(str(p))
+        m2 = SetlistModel()
+        m2.load_from_path(str(p))
+        assert m2.get_song("Sang A")["notes"] == "Capo 3 · spil softere på outro"
+    # Og at noterne er med i HTML
+    opts = default_print_options()
+    html = m.generate_html("Test", opts)
+    assert "Capo 3" in html
+    print("  regression: notes persist after edit + reload OK")
+
+
 # ===========================================================================
 # Updater (online opdaterings-tjek) — Fase 14
 # Bruger mock-data så testene aldrig rør GitHub
@@ -1272,6 +1306,7 @@ def run_all() -> None:
         test_regression_markers_do_not_break_set_construction,
         test_regression_can_add_song_after_marker,
         test_regression_notes_field_used_in_html_print,
+        test_regression_notes_persist_after_edit,
         test_updater_parse_version,
         test_updater_is_newer,
         test_updater_parse_release_full,
