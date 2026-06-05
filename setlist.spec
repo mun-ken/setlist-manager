@@ -20,13 +20,21 @@ datas = []
 if HAS_ICON:
     datas.append((ICON_PATH, "assets"))
 
+# Inkluder certifi's CA-bundle så auto-update kan validere GitHub's SSL-cert
+# (PyInstaller bundles på Windows mangler ellers ofte CA-certifikater).
+try:
+    import certifi
+    datas.append((certifi.where(), "certifi"))
+except ImportError:
+    pass
+
 
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=["certifi"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

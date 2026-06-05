@@ -169,20 +169,97 @@ def is_skipped(version: str) -> bool:
 # ---------------------------------------------------------------------------
 # Selve API-kaldet
 # ---------------------------------------------------------------------------
+def _build_ssl_contexts() -> List[ssl.SSLContext]:
+    """Lav en liste af SSL-kontekster vi vil prøve i rækkefølge.
+
+    PyInstaller-byggede .exe'er på Windows mangler ofte CA-certifikater
+    så ``ssl.create_default_context()`` fejler med
+    ``CERTIFICATE_VERIFY_FAILED``. Vi prøver derfor flere strategier:
+
+    1. Default context (Python's egen + systemets CA store)
+    2. certifi's CA-bundle (hvis pakken er installeret/bundlet)
+    3. truststore (Windows/macOS native cert store, hvis tilgængeligt)
+    """
+    contexts: List[ssl.SSLContext] = []
+
+    # 1) Default — virker næsten altid på macOS/Linux og rene Python-installs
+    try:
+        contexts.append(ssl.create_default_context())
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2) certifi — pålideligt CA-bundle uafhængigt af system
+    try:
+        import certifi  # type: ignore
+        contexts.append(ssl.create_default_context(cafile=certifi.where()))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2b) certifi-bundle pakket ind i PyInstaller (_MEIPASS/certifi/cacert.pem)
+    try:
+        if hasattr(sys, "_MEIPASS"):
+            bundled = Path(sys._MEIPASS) / "certifi" / "cacert.pem"  # type: ignore[attr-defined]
+            if bundled.exists():
+                contexts.append(ssl.create_default_context(cafile=str(bundled)))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 3) truststore — bruger OS' native cert-store (Windows/macOS keychain)
+    try:
+        import truststore  # type: ignore
+        contexts.append(truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    except Exception:  # noqa: BLE001
+        pass
+
+    return contexts
+
+
+# Sidste fejl fra _fetch_latest_release — så GUI kan vise hvorfor det fejlede
+last_error: str = ""
+
+
 def _fetch_latest_release(timeout: float = 8.0,
                           owner: str = GITHUB_OWNER,
                           repo: str = GITHUB_REPO) -> dict:
-    """Hent rå JSON fra GitHub Releases API. Kaster ved netværksfejl."""
+    """Hent rå JSON fra GitHub Releases API. Kaster ved netværksfejl.
+
+    Prøver flere SSL-strategier hvis den første fejler (vigtigt for
+    PyInstaller-bundles på Windows hvor CA-certifikater kan mangle).
+    """
+    global last_error
     url = _API_URL_TEMPLATE.format(owner=owner, repo=repo)
     req = urllib.request.Request(url, headers={
         "User-Agent": _USER_AGENT,
         "Accept": "application/vnd.github+json",
     })
-    # Brug systemets default CA-bundle (vigtigt for at undgå SSL-fejl)
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        raw = resp.read().decode("utf-8")
-    return json.loads(raw)
+
+    contexts = _build_ssl_contexts()
+    if not contexts:
+        last_error = "Kunne ikke oprette SSL-kontekst (Python uden ssl-modul?)"
+        raise ssl.SSLError(last_error)
+
+    last_exc: Optional[Exception] = None
+    for ctx in contexts:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                raw = resp.read().decode("utf-8")
+            last_error = ""  # success — ryd evt. gammel fejl
+            return json.loads(raw)
+        except (urllib.error.URLError, ssl.SSLError) as e:
+            last_exc = e
+            # SSL-fejl? Prøv næste context. Andre fejl? Også prøv næste — kunne
+            # være proxy-relateret hvor en anden SSL-strategi virker.
+            continue
+        except urllib.error.HTTPError:
+            # HTTP-fejl (fx 404) — ikke et SSL-problem, kast videre
+            raise
+
+    # Alle kontekster fejlede — gem detaljen og kast den sidste exception
+    if last_exc is not None:
+        last_error = f"{type(last_exc).__name__}: {last_exc}"
+        raise last_exc
+    last_error = "Ukendt netværksfejl"
+    raise urllib.error.URLError(last_error)
 
 
 def parse_release(data: dict, current: str = APP_VERSION) -> UpdateInfo:
@@ -231,15 +308,32 @@ def check_for_update(timeout: float = 8.0,
 
     Returnerer altid en UpdateInfo (med ``is_newer`` flag) hvis tjekket
     lykkedes, ellers None ved netværksfejl. Crasher aldrig.
+
+    Detaljeret fejlbesked kan læses fra modul-attributten ``last_error``
+    efter et fejlet kald — nyttig til at vise meningsfuld besked til brugeren.
     """
+    global last_error
     try:
         data = _fetch_latest_release(timeout=timeout, owner=owner, repo=repo)
     except urllib.error.HTTPError as e:
         # 404 = ingen releases endnu — behandl som "ingen ny version"
         if e.code == 404:
+            last_error = ""
             return UpdateInfo(current=current, latest=current)
+        last_error = f"HTTP {e.code}: {e.reason}"
         return None
-    except (urllib.error.URLError, ssl.SSLError, TimeoutError, OSError, ValueError):
+    except urllib.error.URLError as e:
+        last_error = f"Netværk: {e.reason}"
+        return None
+    except ssl.SSLError as e:
+        last_error = f"SSL: {e}"
+        return None
+    except (TimeoutError, OSError) as e:
+        last_error = f"{type(e).__name__}: {e}"
+        return None
+    except ValueError as e:
+        last_error = f"Ugyldigt svar fra GitHub: {e}"
         return None
 
+    last_error = ""
     return parse_release(data, current=current)

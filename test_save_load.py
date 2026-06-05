@@ -1116,6 +1116,51 @@ def test_updater_check_returns_none_on_network_error() -> None:
     print("  updater returns None on network error OK")
 
 
+def test_updater_records_last_error_on_failure() -> None:
+    """Når et tjek fejler skal updater.last_error indeholde en meningsfuld
+    grund — så GUI'en kan vise hvorfor det fejlede i stedet for bare
+    'ingen forbindelse'.
+    """
+    import urllib.error
+    import ssl
+    from unittest.mock import patch
+    import updater
+
+    # 1) Netværksfejl
+    with patch.object(updater, "_fetch_latest_release",
+                     side_effect=urllib.error.URLError("connection refused")):
+        result = updater.check_for_update(timeout=1)
+    assert result is None
+    assert "connection refused" in updater.last_error.lower() or \
+           "netværk" in updater.last_error.lower()
+
+    # 2) SSL-fejl (typisk på Windows uden CA-certs)
+    with patch.object(updater, "_fetch_latest_release",
+                     side_effect=ssl.SSLError("CERTIFICATE_VERIFY_FAILED")):
+        result = updater.check_for_update(timeout=1)
+    assert result is None
+    assert "ssl" in updater.last_error.lower() or \
+           "certificate" in updater.last_error.lower()
+
+    # 3) Success — fejl skal ryddes
+    with patch.object(updater, "_fetch_latest_release",
+                     return_value={"tag_name": "v1.0.0"}):
+        result = updater.check_for_update(current="1.0.0")
+    assert result is not None
+    assert updater.last_error == ""
+    print("  updater records last_error on failure OK")
+
+
+def test_updater_ssl_context_builder_returns_list() -> None:
+    """_build_ssl_contexts skal altid returnere mindst én strategi
+    (medmindre Python er bygget uden ssl-modul, hvilket aldrig sker)."""
+    import updater
+    contexts = updater._build_ssl_contexts()
+    assert isinstance(contexts, list)
+    assert len(contexts) >= 1, "Mindst én SSL-strategi skal være tilgængelig"
+    print(f"  updater SSL context builder OK ({len(contexts)} strategier)")
+
+
 def test_updater_check_returns_info_on_success() -> None:
     """check_for_update returnerer en UpdateInfo ved success."""
     from unittest.mock import patch
@@ -1237,6 +1282,8 @@ def run_all() -> None:
         test_updater_cache_rate_limiting,
         test_updater_skip_version,
         test_updater_check_returns_none_on_network_error,
+        test_updater_records_last_error_on_failure,
+        test_updater_ssl_context_builder_returns_list,
         test_updater_check_returns_info_on_success,
         test_updater_check_handles_404_gracefully,
         test_version_module_has_required_fields,

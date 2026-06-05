@@ -2105,12 +2105,23 @@ class SetlistApp:
         if info is None:
             # Netværksfejl
             if not silent:
-                messagebox.showwarning(
-                    "Ingen forbindelse",
-                    "Kunne ikke kontakte GitHub for at tjekke efter opdateringer.\n"
-                    "Tjek din internetforbindelse og prøv igen.",
-                    parent=self.root,
+                detail = getattr(updater, "last_error", "") or "ukendt fejl"
+                releases_url = (
+                    f"https://github.com/{updater.GITHUB_OWNER}"
+                    f"/{updater.GITHUB_REPO}/releases/latest"
                 )
+                msg = (
+                    "Kunne ikke kontakte GitHub for at tjekke efter opdateringer.\n\n"
+                    f"Detalje: {detail}\n\n"
+                    "Vil du åbne release-siden i din browser i stedet?\n"
+                    f"({releases_url})"
+                )
+                if messagebox.askyesno("Ingen forbindelse", msg, parent=self.root):
+                    try:
+                        import webbrowser
+                        webbrowser.open(releases_url)
+                    except Exception:  # noqa: BLE001
+                        pass
             return
 
         if not info.is_newer:
