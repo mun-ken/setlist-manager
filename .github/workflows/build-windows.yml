@@ -29,6 +29,13 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # Tving Python til UTF-8 på Windows (default er cp1252 som ikke kan
+    # printe Unicode-tegn som → eller ✅ — det får ellers vores tests til
+    # at crashe i workflow'en selvom de virker fint lokalt).
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
