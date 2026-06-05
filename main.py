@@ -517,6 +517,18 @@ class PrintDialog(tk.Toplevel):
                     font=font_norm, fg="#555", width=4,
                 ).pack(side=tk.RIGHT, padx=(4, 0))
 
+            # Noter — vises som indrykket linje under sangen (kun hvis
+            # show_notes er slået til OG sangen rent faktisk har noter).
+            if opts.get("show_notes", True) and song.get("notes"):
+                indent = 3 + 6 if opts["show_number"] else 0
+                notes_text = song["notes"].replace("\n", " · ")
+                tk.Label(
+                    self._songs_frame, bg="white",
+                    text=notes_text, anchor=tk.W, justify=tk.LEFT,
+                    font=("Helvetica", sizes["notes"], "italic"),
+                    fg="#666", wraplength=320,
+                ).pack(fill=tk.X, padx=(indent * 6, 4), pady=(0, 2))
+
         if len(items) > max_rows:
             tk.Label(
                 self._songs_frame, bg="white", fg="#888",
@@ -1883,7 +1895,12 @@ class SetlistApp:
             self.lib_tree.delete(item)
         # Konfigurer tag for sange der allerede er i setlisten — vis dem grå
         self.lib_tree.tag_configure("in_setlist", foreground="#9a9a9a")
-        in_set = set(self.model.current_setlist["songs"])
+        # NB: setlisten kan indeholde både sang-strenge OG markør-dicts
+        # ({"marker": "EKSTRA"}). Dicts er ikke hashable, så vi MÅ ikke
+        # putte hele listen ind i en set() — vi tager kun sang-navnene.
+        in_set = {item_song_name(it)
+                  for it in self.model.current_setlist["songs"]
+                  if not is_marker_item(it)}
         shown = 0
         for idx, s in enumerate(self.model.library):
             if q and not self._lib_song_matches(s, q):

@@ -887,6 +887,92 @@ def test_old_setlist_format_still_works() -> None:
 
 
 # ===========================================================================
+# Regression-tests for bugs rapporteret af brugeren (juni 2026)
+# ===========================================================================
+def test_regression_markers_do_not_break_set_construction() -> None:
+    """Bug: refresh_library_view kaldte set(songs) — crashede når der var
+    markører (dicts er ikke hashable). Symptom: alle sange forsvandt fra
+    biblioteket efter man trykkede 'Ekstra-nummer'.
+
+    Fix: brug en set-comprehension der kun samler sang-navne og
+    springer markører over.
+    """
+    from setlist_model import is_marker_item, item_song_name
+    m = SetlistModel()
+    m.add_song("Sang A")
+    m.add_song("Sang B")
+    m.add_to_setlist_by_index(0)
+    m.add_to_setlist_by_index(1)
+    m.add_marker_to_setlist("EKSTRA-NUMMER")
+
+    # Det gamle (broken) udtryk ville crashe her:
+    try:
+        _ = set(m.current_setlist["songs"])
+        old_broken = False
+    except TypeError:
+        old_broken = True
+    assert old_broken, "Test-setup forkert — markøren burde være en dict"
+
+    # Det nye (fixed) udtryk skal IKKE crashe:
+    in_set = {item_song_name(it)
+              for it in m.current_setlist["songs"]
+              if not is_marker_item(it)}
+    assert in_set == {"Sang A", "Sang B"}
+    print("  regression: markers do not break set() construction OK")
+
+
+def test_regression_can_add_song_after_marker() -> None:
+    """Bug: efter man har tilføjet en markør, kunne man ikke tilføje
+    flere sange (refresh_library_view crashede silent → biblioteket blev tomt).
+
+    Vi simulerer her hele add-flowet uden GUI for at verificere at
+    modellen kan håndtere det.
+    """
+    m = SetlistModel()
+    m.add_song("Sang A")
+    m.add_song("Sang B")
+    m.add_song("Sang C")
+    # Bruger tilføjer Sang A til setlisten
+    assert m.add_to_setlist_by_index(0) is True
+    # Bruger trykker "Ekstra-nummer"
+    pos = m.add_marker_to_setlist("EKSTRA-NUMMER")
+    assert pos == 1
+    # Bruger tilføjer flere sange BAGEFTER (det er det der var broken)
+    assert m.add_to_setlist_by_index(1) is True
+    assert m.add_to_setlist_by_index(2) is True
+    assert m.current_setlist["songs"] == [
+        "Sang A",
+        {"marker": "EKSTRA-NUMMER"},
+        "Sang B",
+        "Sang C",
+    ]
+    # Sang-tæller ignorerer markøren
+    assert m.current_setlist_song_count() == 3
+    print("  regression: can add songs after a marker OK")
+
+
+def test_regression_notes_field_used_in_html_print() -> None:
+    """Bug: brugeren skrev noter, men kunne ikke se dem i print-preview.
+    HTML-printen havde dem dog hele tiden. Denne test sikrer at noterne
+    rent faktisk renderes i HTML når show_notes=True.
+    """
+    m = SetlistModel()
+    m.add_song("Wonderwall", key="Em", notes="Husk capo på 2. bånd")
+    m.add_to_setlist_by_index(0)
+    opts = default_print_options()
+    opts["show_notes"] = True
+    html = m.generate_html("Test", opts)
+    assert "Husk capo på 2. bånd" in html, \
+        "Noter skal være med i HTML når show_notes=True"
+    # Modsat: når show_notes=False, må noterne IKKE være med
+    opts["show_notes"] = False
+    html2 = m.generate_html("Test", opts)
+    assert "Husk capo på 2. bånd" not in html2, \
+        "Noter må IKKE være med i HTML når show_notes=False"
+    print("  regression: notes field renders in HTML print OK")
+
+
+# ===========================================================================
 # Updater (online opdaterings-tjek) — Fase 14
 # Bruger mock-data så testene aldrig rør GitHub
 # ===========================================================================
@@ -1138,6 +1224,9 @@ def run_all() -> None:
         test_html_show_table_header_toggle,
         test_all_print_options_persisted,
         test_old_setlist_format_still_works,
+        test_regression_markers_do_not_break_set_construction,
+        test_regression_can_add_song_after_marker,
+        test_regression_notes_field_used_in_html_print,
         test_updater_parse_version,
         test_updater_is_newer,
         test_updater_parse_release_full,
