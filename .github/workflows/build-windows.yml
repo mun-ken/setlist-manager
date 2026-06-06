@@ -95,15 +95,24 @@ jobs:
           # Find Processing.NDI.Lib.x64.dll i dist-mappen.
           # Hvis den IKKE findes vil end-user få 'NDI Runtime ikke fundet'
           # selvom de bare har installeret vores app — det er en hård fejl.
-          $found = Get-ChildItem -Path "dist\SetlistManager" -Recurse -Filter "Processing.NDI*"
-          if ($found.Count -eq 0) {
-            Write-Error "NDI DLL ikke fundet i dist! Bygget mangler NDI runtime."
-            Write-Host "Files in dist:"
-            Get-ChildItem -Path "dist\SetlistManager" -Recurse -Name | Select-Object -First 50
+          $dll = Get-ChildItem -Path "dist\SetlistManager" -Recurse -Filter "Processing.NDI.Lib*.dll"
+          if ($dll.Count -eq 0) {
+            Write-Error "❌ NDI DLL ikke fundet i dist! Bygget mangler NDI runtime."
+            Write-Host "Alle NDI-relaterede filer fundet:"
+            Get-ChildItem -Path "dist\SetlistManager" -Recurse -Filter "*NDI*" | ForEach-Object { Write-Host "   - $($_.FullName)" }
+            Write-Host ""
+            Write-Host "Hele NDIlib-mappens indhold:"
+            $ndilib_path = "dist\SetlistManager\_internal\NDIlib"
+            if (Test-Path $ndilib_path) {
+              Get-ChildItem -Path $ndilib_path -Recurse | ForEach-Object { Write-Host "   - $($_.Name) ($($_.Length) bytes)" }
+            }
             exit 1
           }
-          Write-Host "✅ NDI DLL fundet:"
-          foreach ($f in $found) { Write-Host "   - $($f.FullName)" }
+          Write-Host "✅ NDI Runtime DLL bundlet ($($dll.Count) fil(er)):"
+          foreach ($f in $dll) {
+            $sizeMB = [math]::Round($f.Length / 1MB, 2)
+            Write-Host "   - $($f.FullName)  ($sizeMB MB)"
+          }
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
