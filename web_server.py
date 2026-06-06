@@ -62,6 +62,7 @@ def build_state_snapshot(
     # Beregn 1-baseret sang-nummer (uden markører)
     songs_list = []
     song_num = 0
+    current_song_num = 0  # 1-baseret nummer på current
     for idx, item in enumerate(items):
         if is_marker_item(item):
             songs_list.append({
@@ -73,6 +74,9 @@ def build_state_snapshot(
             song_num += 1
             name = item_song_name(item)
             song = model.get_song(name) or {}
+            is_current = (idx == current_idx)
+            if is_current:
+                current_song_num = song_num
             songs_list.append({
                 "idx": idx,
                 "type": "song",
@@ -81,15 +85,30 @@ def build_state_snapshot(
                 "key": song.get("key", ""),
                 "duration": song.get("duration", ""),
                 "notes": song.get("notes", ""),
-                "is_current": (idx == current_idx),
+                "is_current": is_current,
             })
+
+    # Find current + next song (spring markører over) — bruges af /notes view
+    current_song = None
+    next_song = None
+    for s in songs_list:
+        if s["type"] != "song":
+            continue
+        if current_song is None and s["is_current"]:
+            current_song = s
+        elif current_song is not None:
+            next_song = s
+            break
 
     return {
         "band": band_name,
         "setlist": setlist_name,
         "current_idx": current_idx,
+        "current_num": current_song_num,
         "songs": songs_list,
         "total_songs": song_num,
+        "current_song": current_song,
+        "next_song": next_song,
     }
 
 
@@ -398,6 +417,266 @@ _SETLIST_HTML = """<!DOCTYPE html>
 """
 
 
+# ===========================================================================
+#  /notes view — store kort med NUVÆRENDE + NÆSTE SANG (ligesom NDI preview)
+# ===========================================================================
+_NOTES_HTML = """<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{setlist}} — Noter</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: #0a0a0a; color: #e5e5ea;
+    min-height: 100vh;
+  }
+  .header {
+    position: sticky; top: 0;
+    background: rgba(10,10,10,0.95);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    padding: 10px 16px;
+    border-bottom: 1px solid #1c1c1e;
+    z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 13px;
+  }
+  .header .left { display: flex; align-items: center; gap: 8px; color: #aeaeb2; }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #00d96c;
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+  }
+  .header .position { color: #e5e5ea; font-weight: 600; }
+  .home-link {
+    color: #8e8e93; text-decoration: none;
+    padding: 4px 10px;
+    border: 1px solid #2c2c2e; border-radius: 6px;
+  }
+  .main { padding: 16px; max-width: 900px; margin: 0 auto; }
+
+  /* Sang-kort — matcher NDI renderer farver */
+  .card {
+    background: #141417;
+    border-radius: 14px;
+    padding: 22px 22px 26px 26px;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card.next { background: #131316; }
+  /* Venstre accent-stribe */
+  .card::before {
+    content: ""; position: absolute;
+    left: 0; top: 0; bottom: 0; width: 5px;
+  }
+  .card.current::before { background: #00d96c; }
+  .card.next::before { background: #e89e2a; }
+
+  .card .label {
+    font-size: 12px; font-weight: 700;
+    letter-spacing: 1.5px; text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .card.current .label { color: #00d96c; }
+  .card.next .label { color: #e89e2a; }
+
+  .card .name {
+    font-size: 32px; line-height: 1.1;
+    font-weight: 800;
+    color: #fff;
+    margin-bottom: 8px;
+    word-break: break-word;
+  }
+  .card.next .name { font-size: 24px; }
+
+  .card .meta {
+    color: #aeaeb2;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 14px;
+  }
+  .card.next .meta { font-size: 13px; }
+
+  /* Noter — gul highlighter ligesom Stage Mode + NDI */
+  .notes-box {
+    background: #fde047;
+    color: #1a1a1a;
+    border-left: 5px solid #ca8a04;
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 16px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .card.next .notes-box { font-size: 14px; padding: 10px 14px; }
+  .notes-box .icon { font-size: 17px; margin-right: 4px; }
+
+  .empty-notes {
+    color: #48484a; font-style: italic; font-size: 14px;
+  }
+
+  .end-of-set {
+    text-align: center;
+    color: #6e6e73;
+    padding: 24px;
+    font-style: italic;
+    font-size: 16px;
+  }
+
+  .reconnecting {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: #d70015; color: #fff;
+    padding: 8px 16px; border-radius: 20px;
+    font-size: 13px; opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .reconnecting.show { opacity: 1; }
+
+  /* Bigger fonts on tablets */
+  @media (min-width: 768px) {
+    .card { padding: 28px 28px 32px 32px; }
+    .card .name { font-size: 44px; }
+    .card.next .name { font-size: 32px; }
+    .notes-box { font-size: 19px; }
+    .card.next .notes-box { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="left">
+    <span class="live-dot"></span>
+    <span>{{setlist}}</span>
+  </div>
+  <div class="position" id="position">{{position}}</div>
+  <a class="home-link" href="/">← Skift</a>
+</div>
+<div class="main" id="main">
+  <div id="current-slot">{{current_card}}</div>
+  <div id="next-slot">{{next_card}}</div>
+</div>
+<div class="reconnecting" id="reconnect">Genopretter forbindelse…</div>
+<script>
+(function() {
+  let evt = null;
+  const reconnectEl = document.getElementById("reconnect");
+  const positionEl = document.getElementById("position");
+  const currentSlot = document.getElementById("current-slot");
+  const nextSlot = document.getElementById("next-slot");
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"
+    })[c]);
+  }
+
+  function renderSongCard(song, isCurrent) {
+    if (!song) {
+      if (isCurrent) {
+        return `<div class="end-of-set">— Ingen sang valgt —</div>`;
+      }
+      return `<div class="end-of-set">— Slut på sætlisten —</div>`;
+    }
+    const cls = isCurrent ? "card current" : "card next";
+    const label = isCurrent ? "▶ Nuværende" : "⏭ Næste sang";
+    const meta = [song.key, song.duration].filter(Boolean).join("   ·   ");
+    const notes = (song.notes || "").trim();
+    let notesHtml = "";
+    if (notes) {
+      notesHtml = `<div class="notes-box"><span class="icon">📝</span>${escapeHtml(notes)}</div>`;
+    } else if (isCurrent) {
+      notesHtml = `<div class="empty-notes">(ingen noter til denne sang)</div>`;
+    }
+    return `
+      <div class="${cls}">
+        <div class="label">${label}</div>
+        <div class="name">${escapeHtml(song.name)}</div>
+        ${meta ? `<div class="meta">${escapeHtml(meta)}</div>` : ""}
+        ${notesHtml}
+      </div>`;
+  }
+
+  function render(state) {
+    // Position-tekst (fx "Sang 6 af 19")
+    if (state.current_num && state.total_songs) {
+      positionEl.textContent = `Sang ${state.current_num} af ${state.total_songs}`;
+    } else {
+      positionEl.textContent = "";
+    }
+    currentSlot.innerHTML = renderSongCard(state.current_song, true);
+    nextSlot.innerHTML = renderSongCard(state.next_song, false);
+  }
+
+  function connect() {
+    if (evt) evt.close();
+    evt = new EventSource("/events");
+    evt.onopen = () => { reconnectEl.classList.remove("show"); };
+    evt.onmessage = (e) => {
+      try { render(JSON.parse(e.data)); }
+      catch (err) { console.error(err); }
+    };
+    evt.onerror = () => {
+      reconnectEl.classList.add("show");
+    };
+  }
+  connect();
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def _render_position_text(state: dict) -> str:
+    """Format 'Sang X af Y' header text."""
+    if state.get("current_num") and state.get("total_songs"):
+        return f'Sang {state["current_num"]} af {state["total_songs"]}'
+    return ""
+
+
+def _render_song_card(song: Optional[dict], *, is_current: bool) -> str:
+    """Server-render et sang-kort (så side virker uden JS også)."""
+    if song is None:
+        if is_current:
+            return '<div class="end-of-set">— Ingen sang valgt —</div>'
+        return '<div class="end-of-set">— Slut på sætlisten —</div>'
+
+    cls = "card current" if is_current else "card next"
+    label = "▶ Nuværende" if is_current else "⏭ Næste sang"
+    meta_parts = [v for v in (song.get("key", ""), song.get("duration", "")) if v]
+    meta = "   ·   ".join(meta_parts)
+    meta_html = f'<div class="meta">{html.escape(meta)}</div>' if meta else ""
+
+    notes = (song.get("notes") or "").strip()
+    if notes:
+        notes_html = (
+            f'<div class="notes-box"><span class="icon">📝</span>'
+            f'{html.escape(notes)}</div>'
+        )
+    elif is_current:
+        notes_html = '<div class="empty-notes">(ingen noter til denne sang)</div>'
+    else:
+        notes_html = ""
+
+    return (
+        f'<div class="{cls}">'
+        f'<div class="label">{label}</div>'
+        f'<div class="name">{html.escape(song["name"])}</div>'
+        f'{meta_html}{notes_html}'
+        f'</div>'
+    )
+
+
 def _render_initial_rows(state: dict, view: str) -> str:
     """Server-side render af første HTML — så siden virker også uden JS."""
     rows = []
@@ -464,7 +743,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             elif path == "/setlist":
                 self._render_list_page("setlist")
             elif path == "/notes":
-                self._render_list_page("notes")
+                self._render_notes_page()
             elif path == "/events":
                 self._stream_events()
             elif path == "/api/state":
@@ -498,6 +777,20 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "{{view}}", view
         ).replace(
             "{{rows}}", _render_initial_rows(state, view)
+        )
+        self._send_html(body)
+
+    def _render_notes_page(self):
+        """Render NDI-preview-style notes view (current + next song cards)."""
+        state = self.server_app._snapshot()
+        body = (
+            _NOTES_HTML
+            .replace("{{setlist}}", html.escape(state.get("setlist") or "Setlist"))
+            .replace("{{position}}", _render_position_text(state))
+            .replace("{{current_card}}", _render_song_card(
+                state.get("current_song"), is_current=True))
+            .replace("{{next_card}}", _render_song_card(
+                state.get("next_song"), is_current=False))
         )
         self._send_html(body)
 

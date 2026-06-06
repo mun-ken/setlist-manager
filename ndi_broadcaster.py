@@ -73,6 +73,8 @@ class NDIBroadcaster:
         self._status_listeners: list = []
         # Frame observers — kaldes når en ny frame er renderet (preview bruger dette)
         self._frame_listeners: list = []
+        # Index observers — kaldes når current_idx skifter (web-server bruger dette)
+        self._index_listeners: list = []
         self._last_frame = None  # cached til preview-vinduer der åbnes senere
 
     # ------------------------------------------------------------------
@@ -103,6 +105,19 @@ class NDIBroadcaster:
         if callback in self._frame_listeners:
             self._frame_listeners.remove(callback)
 
+    def add_index_listener(self, callback: Callable[[int], None]) -> None:
+        """Tilføj callback der kaldes med ny idx hver gang den ændres.
+
+        Bruges af web-server + main app's listbox så de holder sig synkront
+        med navigation foretaget fra preview-vinduet.
+        """
+        if callback not in self._index_listeners:
+            self._index_listeners.append(callback)
+
+    def remove_index_listener(self, callback: Callable[[int], None]) -> None:
+        if callback in self._index_listeners:
+            self._index_listeners.remove(callback)
+
     def _notify_status(self) -> None:
         for cb in list(self._status_listeners):
             try:
@@ -116,6 +131,13 @@ class NDIBroadcaster:
                 cb(frame)
             except Exception as e:  # noqa: BLE001
                 print(f"[NDIBroadcaster] frame listener fejl: {e}")
+
+    def _notify_index(self, idx: int) -> None:
+        for cb in list(self._index_listeners):
+            try:
+                cb(idx)
+            except Exception as e:  # noqa: BLE001
+                print(f"[NDIBroadcaster] index listener fejl: {e}")
 
     # ------------------------------------------------------------------
     #  Public API
@@ -146,7 +168,8 @@ class NDIBroadcaster:
     def set_current_index(self, idx: int) -> None:
         """Skift hvilken sang der vises som 'NUVÆRENDE' i NDI-feed'et.
 
-        Effekt'en mærkes i næste render-tick (max 100ms).
+        Effekt'en mærkes i næste render-tick (max 100ms). Fyrer
+        index_listeners så web-server + main app's listbox kan følge med.
         """
         items = self.model.current_setlist.get("songs", [])
         if not items:
@@ -157,7 +180,11 @@ class NDIBroadcaster:
             idx += 1
         if idx >= len(items):
             return
+        # Kun notify hvis det faktisk er en ændring (undgår spam)
+        changed = (idx != self._current_idx)
         self._current_idx = idx
+        if changed:
+            self._notify_index(idx)
 
     def set_stage_window(self, stage_window: Optional[tk.Toplevel]) -> None:
         """Når mode = stage_capture: hvilken Toplevel vi skal grabbe."""

@@ -2139,7 +2139,31 @@ class SetlistApp:
             from ndi_broadcaster import NDIBroadcaster
             self._ndi_broadcaster = NDIBroadcaster(self.root, self.model)
             self._ndi_broadcaster.add_status_listener(self._update_ndi_status_display)
+            # Når brugeren navigerer fra NDI Preview-vinduet → opdater
+            # web-server + listbox så alt holder sig synkront
+            self._ndi_broadcaster.add_index_listener(self._on_broadcaster_index_changed)
         return self._ndi_broadcaster
+
+    def _on_broadcaster_index_changed(self, idx: int) -> None:
+        """Kaldes når NDI broadcaster's current_idx skifter (typisk fra
+        NDI Preview-vinduets Næste/Forrige knapper).
+
+        Propagerer ændringen til web-server + listbox så alt er i sync.
+        """
+        # 1) Web-server — så telefoner følger med
+        if self._web_server is not None and self._web_server.is_running():
+            try:
+                self._web_server.set_current_index(idx)
+            except Exception:  # noqa: BLE001
+                pass
+        # 2) Listbox i hovedappen — så user ser hvor de er
+        try:
+            self.set_listbox.selection_clear(0, tk.END)
+            self.set_listbox.selection_set(idx)
+            self.set_listbox.activate(idx)
+            self.set_listbox.see(idx)
+        except (tk.TclError, AttributeError):
+            pass
 
     def _update_ndi_status_display(self) -> None:
         """Opdater den røde 'NDI LIVE' indikator i topbaren.
