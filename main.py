@@ -1587,6 +1587,10 @@ class SetlistApp:
         self._ndi_broadcaster = None  # type: ignore[assignment]
         self._ndi_preview_window = None  # type: ignore[assignment]
 
+        # Web-server — bandet kan åbne URL på telefon/iPad og se setlisten live
+        # (oprettes lazy ved første start)
+        self._web_server = None  # type: ignore[assignment]
+
         self._build_menu()
         self._build_top_bar()
         self._build_main_area()
@@ -1652,6 +1656,20 @@ class SetlistApp:
         m_live.add_command(
             label="❓ Om NDI / fejlfinding",
             command=self.show_ndi_help,
+        )
+        m_live.add_separator()
+        # === Web-server (band-telefoner kan se setlisten live) ===
+        m_live.add_command(
+            label="🌐  Start web-visning (telefoner på samme netværk)…",
+            command=self.start_web_server,
+        )
+        m_live.add_command(
+            label="⏹  Stop web-visning",
+            command=self.stop_web_server,
+        )
+        m_live.add_command(
+            label="🔗  Vis web-URL",
+            command=self.show_web_urls,
         )
         m_live.add_separator()
         m_live.add_command(
@@ -1730,6 +1748,21 @@ class SetlistApp:
         self.ndi_status_label.pack(side=tk.RIGHT, padx=(8, 8))
         # Klik på indikatoren = åbn preview-vindue
         self.ndi_status_label.bind("<Button-1>", lambda e: self._on_ndi_status_click())
+
+        # Web-server status-indikator — vises kun når serveren kører
+        # Klik = åbn forsiden i browseren
+        self.web_status_var = tk.StringVar(value="")
+        self.web_status_label = tk.Label(
+            row1,
+            textvariable=self.web_status_var,
+            font=("Segoe UI", 10, "bold"),
+            fg="#0a84ff",  # blå = web (klar adskillelse fra NDI's røde)
+            bg=row1.tk.call("ttk::style", "lookup", "TFrame", "-background")
+                or "#f0f0f0",
+            cursor="hand2",
+        )
+        self.web_status_label.pack(side=tk.RIGHT, padx=(8, 0))
+        self.web_status_label.bind("<Button-1>", lambda e: self._on_web_status_click())
 
         # Row 2: Setlist
         row2 = ttk.Frame(wrap)
@@ -1838,6 +1871,8 @@ class SetlistApp:
         self.set_listbox.bind("<Double-1>", lambda e: self._on_setlist_double_click())
         self.set_listbox.bind("<Delete>", lambda e: self.remove_selected_from_setlist())
         self.set_listbox.bind("<BackSpace>", lambda e: self.remove_selected_from_setlist())
+        # Når brugeren vælger en sang i setlisten — opdater NDI + web
+        self.set_listbox.bind("<<ListboxSelect>>", self._on_setlist_selection_changed)
 
         set_btns = ttk.Frame(right)
         set_btns.pack(fill=tk.X, pady=(6, 0))
@@ -2337,6 +2372,139 @@ class SetlistApp:
                 pass
             self._ndi_capture_sender = None
 
+    # ------------------------------------------------------------------
+    #  Web-server (telefoner/iPads på samme netværk kan se setlisten live)
+    # ------------------------------------------------------------------
+    def _ensure_web_server(self):
+        """Lazy-opret den globale WebServer første gang den bruges."""
+        if self._web_server is None:
+            from web_server import WebServer
+            self._web_server = WebServer(self.model)
+            self._web_server.add_status_listener(self._update_web_status_display)
+        return self._web_server
+
+    def _current_song_idx(self) -> int:
+        """Hent nuværende valgte sang-index (0-baseret) fra setlisten."""
+        sel = self.set_listbox.curselection()
+        return sel[0] if sel else 0
+
+    def _on_setlist_selection_changed(self, _event=None) -> None:
+        """Kaldes når brugeren klikker en sang i setlisten.
+
+        Opdaterer alle aktive subscribers (NDI broadcaster + web-server) så
+        de viser den nye sang. Holder dem i sync uden at vi behøver et
+        komplekst pub/sub-system endnu.
+        """
+        idx = self._current_song_idx()
+        # NDI broadcaster — kun hvis aktiv (ingen grund til at vække den)
+        if self._ndi_broadcaster is not None and self._ndi_broadcaster.is_active():
+            try:
+                self._ndi_broadcaster.set_current_index(idx)
+            except Exception:  # noqa: BLE001
+                pass
+        # Web-server — kun hvis aktiv
+        if self._web_server is not None and self._web_server.is_running():
+            try:
+                self._web_server.set_current_index(idx)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _update_web_status_display(self) -> None:
+        """Opdatér web-server status-indikator i topbaren."""
+        if not hasattr(self, "web_status_var"):
+            return
+        try:
+            ws = self._web_server
+            if ws is None or not ws.is_running():
+                self.web_status_var.set("")
+            else:
+                port = ws.get_port()
+                count = ws.get_client_count()
+                if count > 0:
+                    self.web_status_var.set(f"🌐 Web :{port}  ({count} 📱)")
+                else:
+                    self.web_status_var.set(f"🌐 Web :{port}")
+        except tk.TclError:
+            pass
+
+    def _on_web_status_click(self) -> None:
+        """Klik på web-indikator: åbn forsiden i browseren."""
+        ws = self._web_server
+        if ws is None or not ws.is_running():
+            return
+        urls = ws.get_urls()
+        if urls:
+            import webbrowser
+            webbrowser.open(urls[0])
+
+    def start_web_server(self) -> None:
+        """Start web-serveren så bandet kan se setlisten på deres telefoner."""
+        ws = self._ensure_web_server()
+        if ws.is_running():
+            self.show_web_urls()
+            return
+        ok = ws.start()
+        if not ok:
+            messagebox.showerror(
+                "Kunne ikke starte web-server",
+                "Porten er måske allerede i brug af et andet program.\n"
+                "Prøv at lukke andre apps der bruger HTTP-porten 8765.",
+                parent=self.root,
+            )
+            return
+        # Send initial state baseret på valgt sang
+        ws.set_current_index(self._current_song_idx())
+        # Start periodisk client-count refresh
+        self._schedule_web_status_refresh()
+        # Vis URL'er + lille hjælpsom dialog
+        self.show_web_urls(first_time=True)
+
+    def _schedule_web_status_refresh(self) -> None:
+        """Opdatér client-count i topbaren hver 2 sek så det viser realtid."""
+        if self._web_server is not None and self._web_server.is_running():
+            self._update_web_status_display()
+            try:
+                self.root.after(2000, self._schedule_web_status_refresh)
+            except tk.TclError:
+                pass  # root er ved at lukke
+
+    def stop_web_server(self) -> None:
+        """Stop web-serveren."""
+        if self._web_server is None or not self._web_server.is_running():
+            messagebox.showinfo(
+                "Web-server kører ikke",
+                "Der er ingen web-server at stoppe.",
+                parent=self.root,
+            )
+            return
+        self._web_server.stop()
+
+    def show_web_urls(self, first_time: bool = False) -> None:
+        """Vis dialog med URL'er bandet kan tilgå."""
+        if self._web_server is None or not self._web_server.is_running():
+            messagebox.showinfo(
+                "Web-server ikke aktiv",
+                "Start web-visningen først via Live → Start web-visning.",
+                parent=self.root,
+            )
+            return
+        urls = self._web_server.get_urls()
+        url_text = "\n".join(f"   {u}" for u in urls)
+        intro = (
+            "Web-visningen kører nu! 🎉\n\n"
+            if first_time else
+            "Web-visningen kører på følgende adresser:\n\n"
+        )
+        body = (
+            f"{intro}{url_text}\n\n"
+            "📱 Bandet skal være på SAMME WiFi-netværk som denne PC.\n"
+            "   Åbn én af adresserne i deres browser og vælg visning:\n"
+            "   • 📋 Kun setliste — rene sangtitler\n"
+            "   • 📝 Med noter — sang + noter (som NDI)\n\n"
+            "Siden opdaterer sig automatisk når du skifter sang her."
+        )
+        messagebox.showinfo("🌐 Web-visning", body, parent=self.root)
+
     def show_ndi_help(self) -> None:
         """Vis dialog med info om hvad NDI er + hvordan man bruger det."""
         try:
@@ -2815,6 +2983,14 @@ class SetlistApp:
                 text += f"   ·   ✏️ Sidst ændret: {modified_human}"
         self.status_var.set(text)
 
+        # Notificér web-serveren så åbne browsere får den opdaterede setliste
+        # (NDI broadcaster læser fra modellen direkte hver tick — behøver ikke)
+        if self._web_server is not None and self._web_server.is_running():
+            try:
+                self._web_server.notify_model_changed()
+            except Exception:  # noqa: BLE001
+                pass
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -2871,6 +3047,12 @@ class SetlistApp:
         # Også legacy v1.5.0-1.5.2 capture loop
         try:
             self._stop_ndi_capture()
+        except Exception:  # noqa: BLE001
+            pass
+        # Stop web-server pænt så porten frigives
+        try:
+            if self._web_server is not None:
+                self._web_server.stop()
         except Exception:  # noqa: BLE001
             pass
         self.model.autosave()

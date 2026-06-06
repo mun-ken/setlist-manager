@@ -2847,6 +2847,269 @@ def test_global_hotkeys_enabled_setting_roundtrip() -> None:
     print("  global_hotkeys settings roundtrip OK")
 
 
+# ===========================================================================
+# v1.5.6: Web-server — bandet kan se setlisten live på deres telefoner
+# ===========================================================================
+def test_web_server_module_loads() -> None:
+    """Modulet skal kunne importeres uden side-effects (ingen server start)."""
+    import web_server
+    assert hasattr(web_server, "WebServer")
+    assert hasattr(web_server, "build_state_snapshot")
+    assert hasattr(web_server, "DEFAULT_PORT")
+    print("  web_server module loads OK")
+
+
+def test_web_server_state_snapshot_basic() -> None:
+    """build_state_snapshot returnerer korrekt struktur."""
+    from web_server import build_state_snapshot
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("Test Sang", duration="3:00", key="G", notes="Husk capo")
+    m.current_setlist["songs"] = ["Test Sang"]
+
+    state = build_state_snapshot(m, 0)
+    assert "band" in state
+    assert "setlist" in state
+    assert "current_idx" in state
+    assert "songs" in state
+    assert "total_songs" in state
+    assert state["total_songs"] == 1
+    assert state["current_idx"] == 0
+    assert len(state["songs"]) == 1
+    song = state["songs"][0]
+    assert song["type"] == "song"
+    assert song["name"] == "Test Sang"
+    assert song["key"] == "G"
+    assert song["notes"] == "Husk capo"
+    assert song["is_current"] is True
+    print("  web_server state snapshot OK")
+
+
+def test_web_server_state_snapshot_handles_markers() -> None:
+    """Markører skal vises korrekt i snapshot — ikke som sange."""
+    from web_server import build_state_snapshot
+    from setlist_model import SetlistModel, make_marker
+
+    m = SetlistModel()
+    m.add_song("A"); m.add_song("B")
+    m.current_setlist["songs"] = ["A", make_marker("EKSTRA"), "B"]
+
+    state = build_state_snapshot(m, 0)
+    assert state["total_songs"] == 2
+    assert len(state["songs"]) == 3
+    assert state["songs"][0]["type"] == "song"
+    assert state["songs"][1]["type"] == "marker"
+    assert state["songs"][1]["label"] == "EKSTRA"
+    assert state["songs"][2]["type"] == "song"
+    # Markøren skal IKKE have et num — kun sange tæller
+    assert "num" not in state["songs"][1]
+    print("  web_server state snapshot markers OK")
+
+
+def test_web_server_state_snapshot_current_flag() -> None:
+    """is_current skal kun være True for den nuværende sang."""
+    from web_server import build_state_snapshot
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    for n in ["A", "B", "C"]:
+        m.add_song(n)
+    m.current_setlist["songs"] = ["A", "B", "C"]
+
+    state = build_state_snapshot(m, 1)
+    assert state["songs"][0]["is_current"] is False
+    assert state["songs"][1]["is_current"] is True
+    assert state["songs"][2]["is_current"] is False
+    print("  web_server is_current flag OK")
+
+
+def test_web_server_start_and_stop() -> None:
+    """WebServer skal kunne starte + stoppe pænt + frigive porten."""
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("Test")
+    m.current_setlist["songs"] = ["Test"]
+
+    # Brug høj port for at undgå konflikter med rigtige services
+    ws = WebServer(m, port=18765)
+    try:
+        ok = ws.start()
+        assert ok is True, "start() skal returnere True"
+        assert ws.is_running() is True
+        assert ws.get_port() == 18765
+        urls = ws.get_urls()
+        assert len(urls) >= 1
+        assert any("localhost:18765" in u for u in urls)
+    finally:
+        ws.stop()
+        assert ws.is_running() is False
+        assert ws.get_port() is None
+    print("  web_server start/stop roundtrip OK")
+
+
+def test_web_server_set_current_index_skips_markers() -> None:
+    """set_current_index skal springe markører over (ligesom NDI broadcaster)."""
+    from web_server import WebServer
+    from setlist_model import SetlistModel, make_marker
+
+    m = SetlistModel()
+    for n in ["A", "B", "C"]:
+        m.add_song(n)
+    m.current_setlist["songs"] = ["A", make_marker("EKSTRA"), "B", "C"]
+
+    ws = WebServer(m, port=18766)
+    try:
+        # Bedt om idx=1 (markøren) → skal hoppe til idx=2
+        ws.set_current_index(1)
+        # Tjek via snapshot
+        state = ws._snapshot()
+        assert state["current_idx"] == 2
+    finally:
+        # Vi har ikke startet, så stop() er no-op
+        pass
+    print("  web_server skips markers OK")
+
+
+def test_web_server_serves_index_page() -> None:
+    """HTTP GET / skal returnere forsiden med valg-knapper."""
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("HTTPtest")
+    m.current_setlist["songs"] = ["HTTPtest"]
+
+    ws = WebServer(m, port=18767)
+    try:
+        ws.start()
+        # Hent forsiden
+        with urllib.request.urlopen(
+            f"http://localhost:{ws.get_port()}/", timeout=2.0,
+        ) as r:
+            assert r.status == 200
+            body = r.read().decode("utf-8")
+            # Forsiden skal have begge valg-knapper
+            assert "Kun setliste" in body
+            assert "Setliste med noter" in body
+            assert 'href="/setlist"' in body
+            assert 'href="/notes"' in body
+    finally:
+        ws.stop()
+    print("  web_server serves index page OK")
+
+
+def test_web_server_serves_setlist_and_notes_pages() -> None:
+    """Begge visnings-sider skal returnere 200 med sang-data."""
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("UniqueSong", notes="UniqueNote")
+    m.current_setlist["songs"] = ["UniqueSong"]
+
+    ws = WebServer(m, port=18768)
+    try:
+        ws.start()
+        port = ws.get_port()
+
+        # Setlist (uden noter)
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/setlist", timeout=2.0,
+        ) as r:
+            body = r.read().decode("utf-8")
+            assert "UniqueSong" in body
+            # Setlist-visningen viser IKKE noter i HTML (kun JS-rendered for notes)
+            # Men SSE-data indeholder dem, så vi tjekker bare sang-navnet er der
+
+        # Notes (med noter)
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/notes", timeout=2.0,
+        ) as r:
+            body = r.read().decode("utf-8")
+            assert "UniqueSong" in body
+            assert "UniqueNote" in body  # noter SKAL være i notes-visningen
+    finally:
+        ws.stop()
+    print("  web_server serves setlist + notes pages OK")
+
+
+def test_web_server_api_state_returns_json() -> None:
+    """/api/state skal returnere JSON med snapshot."""
+    import json
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("JsonTest", duration="2:30", key="F")
+    m.current_setlist["songs"] = ["JsonTest"]
+
+    ws = WebServer(m, port=18769)
+    try:
+        ws.start()
+        with urllib.request.urlopen(
+            f"http://localhost:{ws.get_port()}/api/state", timeout=2.0,
+        ) as r:
+            assert r.headers.get("Content-Type", "").startswith("application/json")
+            data = json.loads(r.read().decode("utf-8"))
+            assert data["total_songs"] == 1
+            assert data["songs"][0]["name"] == "JsonTest"
+            assert data["songs"][0]["key"] == "F"
+    finally:
+        ws.stop()
+    print("  web_server /api/state returns JSON OK")
+
+
+def test_web_server_404_for_unknown_path() -> None:
+    """Ukendte ruter skal give 404 — ikke crashe serveren."""
+    import urllib.error
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("X"); m.current_setlist["songs"] = ["X"]
+    ws = WebServer(m, port=18770)
+    try:
+        ws.start()
+        try:
+            urllib.request.urlopen(
+                f"http://localhost:{ws.get_port()}/nonexistent",
+                timeout=2.0,
+            )
+            assert False, "Skulle have raise'et HTTPError"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        ws.stop()
+    print("  web_server 404 for unknown path OK")
+
+
+def test_web_server_status_listener_called() -> None:
+    """status_listener skal kaldes ved start + stop."""
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("X"); m.current_setlist["songs"] = ["X"]
+    ws = WebServer(m, port=18771)
+    calls = [0]
+    ws.add_status_listener(lambda: calls.__setitem__(0, calls[0] + 1))
+    try:
+        ws.start()
+        assert calls[0] >= 1
+    finally:
+        before = calls[0]
+        ws.stop()
+        assert calls[0] > before, "stop skal også notify status"
+    print("  web_server status listener OK")
+
+
 def test_ndi_renderer_get_current_and_next_skips_markers() -> None:
     """get_current_and_next skal springe markører over."""
     from ndi_renderer import get_current_and_next
@@ -3291,6 +3554,17 @@ def run_all() -> None:
         test_global_hotkeys_unsupported_reason_is_helpful,
         test_global_hotkeys_register_returns_false_on_unsupported,
         test_global_hotkeys_enabled_setting_roundtrip,
+        test_web_server_module_loads,
+        test_web_server_state_snapshot_basic,
+        test_web_server_state_snapshot_handles_markers,
+        test_web_server_state_snapshot_current_flag,
+        test_web_server_start_and_stop,
+        test_web_server_set_current_index_skips_markers,
+        test_web_server_serves_index_page,
+        test_web_server_serves_setlist_and_notes_pages,
+        test_web_server_api_state_returns_json,
+        test_web_server_404_for_unknown_path,
+        test_web_server_status_listener_called,
         test_ndi_renderer_get_current_and_next_skips_markers,
         test_ndi_window_does_not_crash_when_ndi_unavailable,
         test_ndi_broadcaster_module_loads,
