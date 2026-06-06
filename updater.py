@@ -25,7 +25,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from version import APP_VERSION, GITHUB_OWNER, GITHUB_REPO
 
@@ -337,3 +337,173 @@ def check_for_update(timeout: float = 8.0,
 
     last_error = ""
     return parse_release(data, current=current)
+
+
+# ---------------------------------------------------------------------------
+# Download + launch installer (rigtig in-app auto-update)
+# ---------------------------------------------------------------------------
+def default_download_dir() -> Path:
+    """Hvor downloader vi installeren til?
+
+    Vi bruger en under-mappe i temp så filen ikke ligger frit i Downloads,
+    og så Windows automatisk rydder op senere. Opretter mappen hvis den
+    ikke findes.
+    """
+    import tempfile
+    d = Path(tempfile.gettempdir()) / "SetlistManagerUpdate"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # falder igennem — kalder må håndtere fejl ved download
+    return d
+
+
+def download_file(url: str,
+                  dest_path: Path,
+                  progress_callback: Optional[Callable[[int, int], None]] = None,
+                  timeout: float = 30.0,
+                  chunk_size: int = 64 * 1024) -> bool:
+    """Hent en fil fra ``url`` og gem den til ``dest_path``.
+
+    Bruger samme SSL-strategier som ``check_for_update`` så det også
+    virker fra PyInstaller-bundles på Windows.
+
+    progress_callback(bytes_downloaded, total_bytes) kaldes løbende.
+    ``total_bytes`` kan være -1 hvis serveren ikke sender Content-Length.
+
+    Returnerer True hvis det lykkedes, False ved fejl
+    (læs ``last_error`` for detaljer).
+    """
+    global last_error
+    if not url:
+        last_error = "Tom URL"
+        return False
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest_path.with_suffix(dest_path.suffix + ".partial")
+
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    contexts = _build_ssl_contexts()
+    if not contexts:
+        last_error = "Ingen SSL-strategier tilgængelige"
+        return False
+
+    last_exc: Optional[Exception] = None
+    for ctx in contexts:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                total = int(resp.headers.get("Content-Length", -1) or -1)
+                downloaded = 0
+                with open(tmp_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            try:
+                                progress_callback(downloaded, total)
+                            except Exception:  # noqa: BLE001
+                                pass  # progress-callback må aldrig crashe download
+            # Atomisk rename så vi ikke ender med en halv fil ved fejl
+            if dest_path.exists():
+                dest_path.unlink()
+            tmp_path.rename(dest_path)
+            last_error = ""
+            return True
+        except (urllib.error.URLError, ssl.SSLError) as e:
+            last_exc = e
+            continue
+        except (OSError, urllib.error.HTTPError) as e:
+            last_error = f"{type(e).__name__}: {e}"
+            # Ryd op
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            return False
+
+    if last_exc is not None:
+        last_error = f"{type(last_exc).__name__}: {last_exc}"
+    else:
+        last_error = "Ukendt download-fejl"
+    if tmp_path.exists():
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+    return False
+
+
+def launch_installer(installer_path: Path, silent: bool = False) -> bool:
+    """Start installeren og lad den overtage.
+
+    På Windows: bruger ``os.startfile()`` som triggerer UAC-prompt korrekt.
+    På macOS/Linux: kører den med subprocess (mest til tests — der er
+    typisk ingen installer der at køre).
+
+    Returnerer True hvis launch lykkedes (programmet kalder typisk
+    ``sys.exit(0)`` umiddelbart efter så installeren kan overskrive filer).
+
+    ``silent``: hvis True, prøv at køre Inno Setup i silent-mode
+    (``/SILENT``) så brugeren ikke skal klikke Næste/Næste/Installér.
+    """
+    global last_error
+    if not installer_path.exists():
+        last_error = f"Filen findes ikke: {installer_path}"
+        return False
+
+    try:
+        if sys.platform.startswith("win"):
+            if silent:
+                # Inno Setup understøtter /SILENT for at undgå klik
+                # /CLOSEAPPLICATIONS: luk vores app hvis den stadig kører
+                # /RESTARTAPPLICATIONS: start vores app igen efter installation
+                import subprocess
+                subprocess.Popen(
+                    [
+                        str(installer_path),
+                        "/SILENT",
+                        "/CLOSEAPPLICATIONS",
+                        "/RESTARTAPPLICATIONS",
+                    ],
+                    creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                )
+            else:
+                # Normal mode — viser installer-wizard
+                import os
+                os.startfile(str(installer_path))  # type: ignore[attr-defined]
+        else:
+            # macOS/Linux: subprocess.Popen i detached mode
+            import subprocess
+            subprocess.Popen(
+                [str(installer_path)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        last_error = ""
+        return True
+    except (OSError, ValueError) as e:
+        last_error = f"Kunne ikke starte installeren: {e}"
+        return False
+
+
+def installer_filename_from_url(url: str, fallback: str = "SetlistManagerSetup.exe") -> str:
+    """Trækker filnavnet ud af en download-URL.
+    Fx 'https://.../SetlistManagerSetup-1.2.0.exe' → 'SetlistManagerSetup-1.2.0.exe'.
+    """
+    if not url:
+        return fallback
+    # Brug urlparse for at undgå query-strings
+    try:
+        from urllib.parse import urlparse
+        path = urlparse(url).path
+        name = path.rsplit("/", 1)[-1]
+        return name if name else fallback
+    except Exception:  # noqa: BLE001
+        return fallback

@@ -1475,6 +1475,238 @@ def test_updater_check_handles_404_gracefully() -> None:
     print("  updater handles 404 gracefully OK")
 
 
+def test_updater_installer_filename_from_url() -> None:
+    """installer_filename_from_url skal trække filnavnet ud af en GitHub
+    release download-URL, og falde tilbage til defaultnavn ved tom/ugyldig
+    URL."""
+    import updater
+    # Almindelig case
+    assert updater.installer_filename_from_url(
+        "https://github.com/x/y/releases/download/v1.2.0/SetlistManagerSetup-1.2.0.exe"
+    ) == "SetlistManagerSetup-1.2.0.exe"
+    # URL der ender på slash → fallback
+    assert updater.installer_filename_from_url("https://x.com/dir/") == "SetlistManagerSetup.exe"
+    # Tom URL → fallback
+    assert updater.installer_filename_from_url("") == "SetlistManagerSetup.exe"
+    # Custom fallback respekteres
+    assert updater.installer_filename_from_url("", fallback="custom.msi") == "custom.msi"
+    # Query-string ignoreres
+    assert updater.installer_filename_from_url(
+        "https://x.com/file.exe?token=abc"
+    ) == "file.exe"
+    print("  updater.installer_filename_from_url OK")
+
+
+def test_updater_default_download_dir_creates_dir() -> None:
+    """default_download_dir skal returnere en Path under systemets temp-dir,
+    og oprette den hvis den ikke findes."""
+    from pathlib import Path
+    import updater
+
+    d = updater.default_download_dir()
+    assert isinstance(d, Path)
+    assert d.exists(), "default_download_dir skal oprette directory hvis det mangler"
+    assert d.is_dir()
+    # Skal være under temp
+    import tempfile
+    assert str(d).startswith(tempfile.gettempdir())
+    print(f"  updater.default_download_dir OK ({d})")
+
+
+def test_updater_download_file_writes_atomically() -> None:
+    """download_file skal:
+    1. Skrive til en .partial-fil først
+    2. Rename atomisk til target-filen ved success
+    3. Kalde progress_callback undervejs
+    """
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    import tempfile, io
+    import updater
+
+    test_content = b"hello world " * 1000  # 12000 bytes
+    progress_calls = []
+
+    def fake_progress(d: int, t: int) -> None:
+        progress_calls.append((d, t))
+
+    # Mock urlopen
+    fake_response = MagicMock()
+    fake_response.headers = {"Content-Length": str(len(test_content))}
+    fake_response.read = MagicMock(
+        side_effect=[test_content[:5000], test_content[5000:], b""]
+    )
+    fake_response.__enter__ = MagicMock(return_value=fake_response)
+    fake_response.__exit__ = MagicMock(return_value=False)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = Path(tmpdir) / "downloaded.bin"
+        partial = dest.with_suffix(dest.suffix + ".partial")
+
+        with patch("urllib.request.urlopen", return_value=fake_response):
+            ok = updater.download_file(
+                "https://example.com/file.bin",
+                dest,
+                progress_callback=fake_progress,
+                chunk_size=5000,
+            )
+
+        assert ok is True, f"download skulle lykkes, last_error={updater.last_error!r}"
+        assert dest.exists(), "Target-fil skal findes efter download"
+        assert not partial.exists(), ".partial-fil skal være væk efter atomisk rename"
+        assert dest.read_bytes() == test_content
+        assert len(progress_calls) >= 1, "progress_callback skulle kaldes mindst en gang"
+        # Sidste kald skal vise færdig download
+        last_d, last_t = progress_calls[-1]
+        assert last_d == len(test_content)
+        assert last_t == len(test_content)
+        print(f"  updater.download_file writes atomically OK ({len(progress_calls)} progress)")
+
+
+def test_updater_download_file_handles_network_error() -> None:
+    """download_file skal returnere False og sætte last_error når netværket
+    fejler — uden at efterlade en korrupt fil."""
+    from pathlib import Path
+    from unittest.mock import patch
+    import urllib.error, tempfile
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = Path(tmpdir) / "should_not_exist.bin"
+        partial = dest.with_suffix(dest.suffix + ".partial")
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
+            ok = updater.download_file("https://example.com/x", dest)
+
+        assert ok is False
+        assert not dest.exists(), "Korrupt fil må IKKE blive liggende"
+        assert not partial.exists(), ".partial skal ryddes op efter fejl"
+        assert updater.last_error, "last_error skal sættes ved fejl"
+        print(f"  updater.download_file network error OK ({updater.last_error!r})")
+
+
+def test_updater_download_file_handles_ssl_error() -> None:
+    """SSL-fejl skal fanges og rapporteres — ikke crashe."""
+    from pathlib import Path
+    from unittest.mock import patch
+    import ssl, tempfile
+    import updater
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = Path(tmpdir) / "ssl_test.bin"
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=ssl.SSLError("CERTIFICATE_VERIFY_FAILED"),
+        ):
+            ok = updater.download_file("https://example.com/x", dest)
+
+        assert ok is False
+        assert not dest.exists()
+        # SSL-fejl skal nævnes
+        err = updater.last_error.lower()
+        assert "ssl" in err or "certificate" in err or "verify" in err, \
+            f"last_error skulle nævne SSL: {updater.last_error!r}"
+        print(f"  updater.download_file SSL error OK")
+
+
+def test_updater_launch_installer_returns_false_when_missing() -> None:
+    """launch_installer skal returnere False hvis filen ikke eksisterer,
+    og sætte last_error — ikke crashe."""
+    from pathlib import Path
+    import updater
+    fake = Path("/tmp/definitely_does_not_exist_12345.exe")
+    assert not fake.exists()
+    ok = updater.launch_installer(fake)
+    assert ok is False
+    assert updater.last_error, "last_error skal sættes"
+    assert "ikke" in updater.last_error.lower() or "not" in updater.last_error.lower() \
+        or "findes" in updater.last_error.lower()
+    print("  updater.launch_installer missing-file OK")
+
+
+def test_updater_launch_installer_calls_correct_command_on_unix() -> None:
+    """På macOS/Linux skal launch_installer kalde subprocess.Popen med
+    start_new_session=True så installeren detacher fra vores proces.
+
+    (Funktionen er primært til Windows, men vi vil teste subprocess-kaldet
+    uden faktisk at køre noget.)
+    """
+    import sys, tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    import updater
+
+    if sys.platform.startswith("win"):
+        # På Windows kalder den os.startfile() — test den i stedet
+        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
+            tmp_path = Path(f.name)
+        try:
+            with patch("os.startfile") as mock_start:
+                ok = updater.launch_installer(tmp_path, silent=False)
+            assert ok is True
+            mock_start.assert_called_once_with(str(tmp_path))
+            print("  updater.launch_installer Windows os.startfile OK")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        # macOS/Linux: subprocess.Popen
+        with tempfile.NamedTemporaryFile(suffix=".sh", delete=False) as f:
+            tmp_path = Path(f.name)
+        try:
+            with patch("subprocess.Popen") as mock_popen:
+                mock_popen.return_value = MagicMock()
+                ok = updater.launch_installer(tmp_path)
+            assert ok is True
+            mock_popen.assert_called_once()
+            # Tjek start_new_session=True er sat
+            _, kwargs = mock_popen.call_args
+            assert kwargs.get("start_new_session") is True, \
+                "Skal detache med start_new_session=True"
+            print("  updater.launch_installer Unix Popen OK")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+
+def test_updater_launch_installer_silent_uses_inno_flags() -> None:
+    """Silent mode på Windows skal sende /SILENT /CLOSEAPPLICATIONS
+    /RESTARTAPPLICATIONS — så Inno Setup kan opdatere uden klik og
+    starte programmet igen efter."""
+    import sys, tempfile
+    from pathlib import Path
+    from unittest.mock import patch, MagicMock
+    import updater
+
+    if not sys.platform.startswith("win"):
+        # Test logikken via patch på subprocess.Popen direkte
+        # Vi simulerer Windows-grenen ved at patche sys.platform
+        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
+            tmp_path = Path(f.name)
+        try:
+            with patch.object(updater, "sys") as mock_sys, \
+                 patch("subprocess.Popen") as mock_popen:
+                mock_sys.platform = "win32"
+                mock_popen.return_value = MagicMock()
+                ok = updater.launch_installer(tmp_path, silent=True)
+
+            assert ok is True
+            mock_popen.assert_called_once()
+            args, kwargs = mock_popen.call_args
+            cmd = args[0]
+            assert "/SILENT" in cmd
+            assert "/CLOSEAPPLICATIONS" in cmd
+            assert "/RESTARTAPPLICATIONS" in cmd
+            print("  updater.launch_installer silent-flags OK")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        # Rigtig Windows — kan ikke patche sys så nemt, skip
+        print("  updater.launch_installer silent-flags (skipped on real Windows)")
+
+
 def test_version_module_has_required_fields() -> None:
     """version.py skal have de tre nødvendige konstanter."""
     import version
@@ -1578,6 +1810,14 @@ def run_all() -> None:
         test_updater_ssl_context_builder_returns_list,
         test_updater_check_returns_info_on_success,
         test_updater_check_handles_404_gracefully,
+        test_updater_installer_filename_from_url,
+        test_updater_default_download_dir_creates_dir,
+        test_updater_download_file_writes_atomically,
+        test_updater_download_file_handles_network_error,
+        test_updater_download_file_handles_ssl_error,
+        test_updater_launch_installer_returns_false_when_missing,
+        test_updater_launch_installer_calls_correct_command_on_unix,
+        test_updater_launch_installer_silent_uses_inno_flags,
         test_version_module_has_required_fields,
     ]
     print(f"Running {len(tests)} tests...")

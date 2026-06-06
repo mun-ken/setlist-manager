@@ -40,6 +40,10 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Tillader in-app updater at lukke en kørende instans og starte den igen efter
+; opdateringen (bruges sammen med /SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS)
+CloseApplications=force
+RestartApplications=yes
 #if FileExists("assets\app.ico")
 SetupIconFile=assets\app.ico
 #endif

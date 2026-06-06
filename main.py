@@ -1244,17 +1244,28 @@ class LogoDialog(tk.Toplevel):
 # Opdaterings-dialog (når der findes en nyere version)
 # ---------------------------------------------------------------------------
 class UpdateDialog(tk.Toplevel):
-    """Dialog der vises når updater har fundet en nyere version."""
+    """Dialog der vises når updater har fundet en nyere version.
 
-    def __init__(self, parent, info: "updater.UpdateInfo") -> None:
+    Tre stadier:
+      1. Spørg (vis release-noter + knapper Spring over / Senere / Download)
+      2. Downloader (vis progress bar)
+      3. Klar (vis "Installer nu" — kører installeren og lukker programmet)
+    """
+
+    def __init__(self, parent, info: "updater.UpdateInfo", app: "SetlistApp | None" = None) -> None:
         super().__init__(parent)
         self.title("Ny version af Setlist Manager")
         self.transient(parent)
         self.resizable(False, False)
         self.info = info
+        self.app = app
+        self.installer_path: Path | None = None
+        self._download_thread = None
+        self._cancelled = False
 
         frm = ttk.Frame(self, padding=16)
         frm.pack(fill=tk.BOTH, expand=True)
+        self._frm = frm
 
         ttk.Label(
             frm,
@@ -1293,33 +1304,235 @@ class UpdateDialog(tk.Toplevel):
             txt.insert("1.0", info.body)
             txt.configure(state=tk.DISABLED)
 
-        # Knapper
-        btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=2, sticky=tk.E + tk.W, pady=(14, 0))
+        # --- Status (skjult indtil download starter) ---
+        self.status_var = tk.StringVar(value="")
+        self.status_lbl = ttk.Label(
+            frm, textvariable=self.status_var, foreground="#555",
+            font=("TkDefaultFont", 9),
+        )
+        # Pakkes først når download starter
 
-        ttk.Button(
-            btns, text="Spring denne over",
+        # --- Progress bar (skjult indtil download starter) ---
+        self.progress = ttk.Progressbar(
+            frm, mode="determinate", length=520, maximum=100,
+        )
+        # Pakkes først når download starter
+
+        # --- Knap-række ---
+        self.btns = ttk.Frame(frm)
+        self.btns.grid(row=7, column=0, columnspan=2, sticky=tk.E + tk.W, pady=(14, 0))
+
+        self.skip_btn = ttk.Button(
+            self.btns, text="Spring denne over",
             command=self._skip,
-        ).pack(side=tk.LEFT)
-        ttk.Button(
-            btns, text="Senere",
+        )
+        self.skip_btn.pack(side=tk.LEFT)
+        self.later_btn = ttk.Button(
+            self.btns, text="Senere",
             command=self.destroy,
-        ).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(
-            btns, text="⬇  Download nu",
-            command=self._download,
-        ).pack(side=tk.RIGHT)
+        )
+        self.later_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        self.action_btn = ttk.Button(
+            self.btns, text="⬇  Download og installer",
+            command=self._start_download,
+        )
+        self.action_btn.pack(side=tk.RIGHT)
 
-        self.bind("<Escape>", lambda e: self.destroy())
+        # Lille link til release-siden som "manuel fallback"
+        self.browser_link = ttk.Label(
+            frm, text="(eller åbn release-siden i browser)",
+            foreground="#0066cc", cursor="hand2", font=("TkDefaultFont", 8, "underline"),
+        )
+        self.browser_link.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
+        self.browser_link.bind("<Button-1>", lambda e: self._open_in_browser())
+
+        self.bind("<Escape>", lambda e: self._on_close())
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         _center_on(self, parent)
         self.grab_set()
 
-    def _download(self) -> None:
-        # Foretræk den direkte installer-URL — fallback til release-siden
-        url = self.info.installer_url or self.info.release_url
-        if url:
-            webbrowser.open(url)
+    # ------------------------------------------------------------------
+    # Stadie 1 → 2: Start download i baggrundstråd
+    # ------------------------------------------------------------------
+    def _start_download(self) -> None:
+        url = self.info.installer_url
+        if not url:
+            # Ingen installer-asset — fallback til browser
+            messagebox.showinfo(
+                "Ingen installer",
+                "Denne version har ingen direkte installer-fil. "
+                "Åbner release-siden i browseren i stedet.",
+                parent=self,
+            )
+            self._open_in_browser()
+            self.destroy()
+            return
+
+        # Vis status + progress
+        self.status_lbl.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(12, 2))
+        self.progress.grid(row=6, column=0, columnspan=2, sticky=tk.W + tk.E)
+        self.status_var.set("Forbereder download…")
+        self.progress["value"] = 0
+
+        # Skjul Spring over, ændre knapper
+        self.skip_btn.pack_forget()
+        self.action_btn.configure(text="⏸  Afbryd", command=self._cancel_download)
+        self.later_btn.pack_forget()
+
+        # Filplacering
+        filename = updater.installer_filename_from_url(url)
+        self.installer_path = updater.default_download_dir() / filename
+
+        # Start download i baggrundstråd
+        import threading
+        self._cancelled = False
+        self._download_thread = threading.Thread(
+            target=self._download_worker, args=(url, self.installer_path),
+            daemon=True, name="download-installer",
+        )
+        self._download_thread.start()
+
+    def _download_worker(self, url: str, dest: Path) -> None:
+        """Kører i baggrundstråden — må IKKE røre Tkinter direkte."""
+        ok = updater.download_file(url, dest, progress_callback=self._on_progress)
+        # Resultat tilbage til main-tråden
+        if self._cancelled:
+            return  # ignorer hvis brugeren afbrød
+        self.after(0, lambda: self._on_download_done(ok))
+
+    def _on_progress(self, downloaded: int, total: int) -> None:
+        """Kaldes fra baggrundstråd — marshal til main-tråd via after()."""
+        if self._cancelled:
+            return
+        self.after(0, lambda: self._update_progress(downloaded, total))
+
+    def _update_progress(self, downloaded: int, total: int) -> None:
+        try:
+            if total > 0:
+                pct = (downloaded / total) * 100
+                self.progress["value"] = pct
+                self.status_var.set(
+                    f"Henter… {_format_mb(downloaded)} / {_format_mb(total)} "
+                    f"({pct:.0f}%)"
+                )
+            else:
+                # Ukendt total
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(20)
+                self.status_var.set(f"Henter… {_format_mb(downloaded)}")
+        except tk.TclError:
+            pass  # dialogen lukket
+
+    def _cancel_download(self) -> None:
+        """Brugeren trykkede Afbryd. Vi sætter et flag; download-tråden
+        kører videre lidt endnu, men ignorerer resultatet."""
+        self._cancelled = True
+        # Ryd partial fil hvis den findes
+        if self.installer_path:
+            partial = self.installer_path.with_suffix(self.installer_path.suffix + ".partial")
+            if partial.exists():
+                try:
+                    partial.unlink()
+                except OSError:
+                    pass
         self.destroy()
+
+    # ------------------------------------------------------------------
+    # Stadie 2 → 3: Download færdig
+    # ------------------------------------------------------------------
+    def _on_download_done(self, ok: bool) -> None:
+        try:
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
+        except tk.TclError:
+            pass
+
+        if not ok:
+            err = getattr(updater, "last_error", "") or "ukendt fejl"
+            if messagebox.askyesno(
+                "Download fejlede",
+                f"Kunne ikke hente installeren.\n\nDetalje: {err}\n\n"
+                "Vil du åbne release-siden i din browser i stedet?",
+                parent=self,
+            ):
+                self._open_in_browser()
+            self.destroy()
+            return
+
+        # Success! Skift knap til "Installer nu"
+        try:
+            self.progress["value"] = 100
+            size_mb = _format_mb(self.installer_path.stat().st_size) if self.installer_path else ""
+            self.status_var.set(f"✅ Download færdig ({size_mb}) — klar til installation")
+            self.action_btn.configure(
+                text="🚀  Installer nu (lukker programmet)",
+                command=self._launch_installer,
+            )
+            # Vis 'Senere' igen så brugeren kan vente med at installere
+            self.later_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Stadie 3: Start installer + luk programmet
+    # ------------------------------------------------------------------
+    def _launch_installer(self) -> None:
+        if not self.installer_path or not self.installer_path.exists():
+            messagebox.showerror(
+                "Fejl", "Installations-filen findes ikke længere.", parent=self,
+            )
+            return
+
+        # Bekræft + advar at programmet lukker
+        if not messagebox.askyesno(
+            "Installer ny version",
+            "Programmet lukker nu så installeren kan opdatere det.\n\n"
+            "Dine sange og setlister er automatisk gemt — de er der "
+            "stadig når du åbner programmet igen.\n\n"
+            "Vil du fortsætte?",
+            parent=self,
+        ):
+            return
+
+        # Gem en sidste gang for en sikkerheds skyld
+        if self.app is not None:
+            try:
+                self.app.model.autosave()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Start installeren
+        ok = updater.launch_installer(self.installer_path)
+        if not ok:
+            err = getattr(updater, "last_error", "") or "ukendt fejl"
+            messagebox.showerror(
+                "Fejl ved start af installer",
+                f"Kunne ikke starte installeren.\n\n"
+                f"Detalje: {err}\n\n"
+                f"Filen ligger her — du kan dobbeltklikke den manuelt:\n"
+                f"{self.installer_path}",
+                parent=self,
+            )
+            return
+
+        # Luk programmet så installeren kan overskrive filerne
+        self.destroy()
+        if self.app is not None:
+            try:
+                self.app.root.after(500, self.app.root.destroy)
+            except Exception:  # noqa: BLE001
+                self.app.root.destroy()
+
+    # ------------------------------------------------------------------
+    # Backup-handlinger
+    # ------------------------------------------------------------------
+    def _open_in_browser(self) -> None:
+        url = self.info.release_url or self.info.installer_url
+        if url:
+            try:
+                webbrowser.open(url)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _skip(self) -> None:
         try:
@@ -1327,6 +1540,19 @@ class UpdateDialog(tk.Toplevel):
         except Exception:  # noqa: BLE001
             pass
         self.destroy()
+
+    def _on_close(self) -> None:
+        """Lukker dialogen — afbryder evt. download."""
+        if self._download_thread is not None and self._download_thread.is_alive():
+            self._cancelled = True
+        self.destroy()
+
+
+def _format_mb(b: int) -> str:
+    """Formatér bytes som MB med én decimal."""
+    if b < 0:
+        return "?"
+    return f"{b / (1024 * 1024):.1f} MB"
 
 
 # ---------------------------------------------------------------------------
@@ -2244,7 +2470,7 @@ class SetlistApp:
             # Brugeren har sprunget over — vis ikke igen før næste version
             return
 
-        UpdateDialog(self.root, info)
+        UpdateDialog(self.root, info, app=self)
 
 
 def main() -> int:
