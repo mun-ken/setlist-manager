@@ -1999,7 +1999,10 @@ def test_stage_mode_supports_window_mode() -> None:
 
     try:
         model = SetlistModel()
+        # VIGTIGT: add_song tilføjer kun til biblioteket — vi skal også
+        # have sangen i setlisten ellers returnerer StageMode tidligt
         model.add_song("X")
+        model.current_setlist["songs"] = ["X"]
 
         # Patch attributes så vi kan tracke fullscreen-kald
         fullscreen_calls = []
@@ -2061,6 +2064,8 @@ def test_stage_mode_font_scales_with_window_size() -> None:
     try:
         model = SetlistModel()
         model.add_song("A")
+        # VIGTIGT: tilføj også til setlisten (add_song er kun bibliotek)
+        model.current_setlist["songs"] = ["A"]
 
         original_attributes = tk.Toplevel.attributes
         def fake_attributes(self, *args, **kw):

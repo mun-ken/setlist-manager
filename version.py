@@ -11,7 +11,7 @@ Hvis du forker projektet, så ret GITHUB_OWNER til dit GitHub-brugernavn
 (og evt. GITHUB_REPO hvis du omdøber repoet).
 """
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 # GitHub repo som opdaterings-tjekket henter Releases fra.
 # Skift til dit eget brugernavn/repo hvis du forker.

@@ -128,6 +128,8 @@ class StageMode(tk.Toplevel):
         super().__init__(parent)
         self.parent = parent
         self.model = model
+        self.mode = mode
+        self._is_fullscreen = False  # bliver evt. overskrevet i _setup_window_mode
         self.title("Setlist Manager — Stage Mode")
 
         # Snapshot af setlisten (vi rører ikke modellen herfra)
@@ -158,7 +160,6 @@ class StageMode(tk.Toplevel):
 
         # === Vindue setup baseret på mode ===
         self.configure(bg=StageColors.BG)
-        self.mode = mode
         self._setup_window_mode(mode)
 
         self.lift()
