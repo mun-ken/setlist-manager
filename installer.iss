@@ -40,10 +40,10 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#MyAppExeName}
-; Tillader in-app updater at lukke en kørende instans og starte den igen efter
-; opdateringen (bruges sammen med /SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS)
-CloseApplications=force
-RestartApplications=yes
+; CloseApplications/RestartApplications fjernet bevidst — de skabte race
+; condition med PyInstaller --onefile's _MEI temp-mappe (resulterede i
+; 'Failed to load Python DLL python312.dll'-fejl). Brugeren får i stedet
+; en almindelig "Start [appname]"-checkbox til sidst i wizarden.
 #if FileExists("assets\app.ico")
 SetupIconFile=assets\app.ico
 #endif

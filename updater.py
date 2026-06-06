@@ -449,6 +449,14 @@ def launch_installer(installer_path: Path, silent: bool = False) -> bool:
 
     ``silent``: hvis True, prøv at køre Inno Setup i silent-mode
     (``/SILENT``) så brugeren ikke skal klikke Næste/Næste/Installér.
+
+    NOTE om /RESTARTAPPLICATIONS: vi bruger den IKKE længere fordi den
+    skaber race condition med PyInstaller --onefile (vores app extracter
+    til en _MEI temp-mappe, der ryddes op når processen lukker; hvis
+    Inno Setup auto-genstarter os FØR oprydningen er færdig, kan den nye
+    proces ikke loade python312.dll → 'Failed to load Python DLL').
+    Brugeren får i stedet en "Start program?"-checkbox til sidst i
+    installeren (standard Inno Setup-opførsel).
     """
     global last_error
     if not installer_path.exists():
@@ -458,22 +466,21 @@ def launch_installer(installer_path: Path, silent: bool = False) -> bool:
     try:
         if sys.platform.startswith("win"):
             if silent:
-                # Inno Setup understøtter /SILENT for at undgå klik
-                # /CLOSEAPPLICATIONS: luk vores app hvis den stadig kører
-                # /RESTARTAPPLICATIONS: start vores app igen efter installation
+                # /SILENT = ingen wizard-vinduer (men man kan stadig se en
+                # lille progress dialog). Vi inkluderer IKKE
+                # /CLOSEAPPLICATIONS eller /RESTARTAPPLICATIONS — vi har
+                # selv lukket app'en pænt og brugeren starter selv programmet
+                # igen via Start-menuen.
                 import subprocess
                 subprocess.Popen(
-                    [
-                        str(installer_path),
-                        "/SILENT",
-                        "/CLOSEAPPLICATIONS",
-                        "/RESTARTAPPLICATIONS",
-                    ],
+                    [str(installer_path), "/SILENT"],
                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
                                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
                 )
             else:
-                # Normal mode — viser installer-wizard
+                # Normal mode — viser installer-wizard så brugeren ser hvad
+                # der sker, og kan vælge at starte programmet efter install
+                # via standard "Start [appname]"-checkbox til sidst.
                 import os
                 os.startfile(str(installer_path))  # type: ignore[attr-defined]
         else:

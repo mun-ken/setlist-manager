@@ -1486,13 +1486,18 @@ class UpdateDialog(tk.Toplevel):
             )
             return
 
-        # Bekræft + advar at programmet lukker
+        # Bekræft + forklar flow
         if not messagebox.askyesno(
             "Installer ny version",
-            "Programmet lukker nu så installeren kan opdatere det.\n\n"
-            "Dine sange og setlister er automatisk gemt — de er der "
+            "Sådan kører det:\n\n"
+            "1. Programmet lukker nu\n"
+            "2. Installeren åbner — klik 'Næste' / 'Installér'\n"
+            "3. Windows beder evt. om tilladelse (klik 'Ja')\n"
+            "4. Til sidst kan du sætte flueben i\n"
+            "   '✔ Start Setlist Manager' så åbner den nye version\n\n"
+            "Dine sange og setlister er automatisk gemt — de er der\n"
             "stadig når du åbner programmet igen.\n\n"
-            "Vil du fortsætte?",
+            "Klar?",
             parent=self,
         ):
             return
@@ -1504,8 +1509,8 @@ class UpdateDialog(tk.Toplevel):
             except Exception:  # noqa: BLE001
                 pass
 
-        # Start installeren
-        ok = updater.launch_installer(self.installer_path)
+        # Start installeren (IKKE silent — brugeren ser wizarden)
+        ok = updater.launch_installer(self.installer_path, silent=False)
         if not ok:
             err = getattr(updater, "last_error", "") or "ukendt fejl"
             messagebox.showerror(
@@ -1518,11 +1523,16 @@ class UpdateDialog(tk.Toplevel):
             )
             return
 
-        # Luk programmet så installeren kan overskrive filerne
+        # Luk programmet så installeren kan overskrive filerne.
+        # VIGTIGT: vi giver installeren et øjeblik til at starte op FØR vi
+        # dræber processen — så installer-vinduet er klart synligt for
+        # brugeren før vores main-vindue forsvinder. Det giver også
+        # PyInstaller's _MEI temp-mappe tid til at blive ryddet op pænt.
         self.destroy()
         if self.app is not None:
             try:
-                self.app.root.after(500, self.app.root.destroy)
+                # 1.5 sekund — nok til at installer-wizarden er fuldt åben
+                self.app.root.after(1500, self.app.root.destroy)
             except Exception:  # noqa: BLE001
                 self.app.root.destroy()
 

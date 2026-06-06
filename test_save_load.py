@@ -1672,9 +1672,11 @@ def test_updater_launch_installer_calls_correct_command_on_unix() -> None:
 
 
 def test_updater_launch_installer_silent_uses_inno_flags() -> None:
-    """Silent mode på Windows skal sende /SILENT /CLOSEAPPLICATIONS
-    /RESTARTAPPLICATIONS — så Inno Setup kan opdatere uden klik og
-    starte programmet igen efter."""
+    """Silent mode på Windows skal sende /SILENT — men IKKE
+    /CLOSEAPPLICATIONS eller /RESTARTAPPLICATIONS. De flags skabte race
+    condition med PyInstaller --onefile's _MEI temp-mappe (resulterede i
+    'Failed to load Python DLL'-fejl ved auto-genstart).
+    """
     import sys, tempfile
     from pathlib import Path
     from unittest.mock import patch, MagicMock
@@ -1697,8 +1699,11 @@ def test_updater_launch_installer_silent_uses_inno_flags() -> None:
             args, kwargs = mock_popen.call_args
             cmd = args[0]
             assert "/SILENT" in cmd
-            assert "/CLOSEAPPLICATIONS" in cmd
-            assert "/RESTARTAPPLICATIONS" in cmd
+            # Disse flags må IKKE være der — de skabte race condition
+            assert "/CLOSEAPPLICATIONS" not in cmd, \
+                "CLOSEAPPLICATIONS skabte race med PyInstaller _MEI cleanup"
+            assert "/RESTARTAPPLICATIONS" not in cmd, \
+                "RESTARTAPPLICATIONS gav 'Failed to load Python DLL'-fejl"
             print("  updater.launch_installer silent-flags OK")
         finally:
             tmp_path.unlink(missing_ok=True)
