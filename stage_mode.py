@@ -56,9 +56,16 @@ class StageColors:
     FG_HINT = "#48484a"         # tastatur-hints
     FG_INDICATOR = "#00d96c"    # grøn ▶ ved current
 
+    # Noter-felt i bunden — DÆMPET (når tomt)
     NOTES_BG = "#141414"
     NOTES_FG = "#e5e5ea"
     NOTES_FG_HINT = "#48484a"
+
+    # Noter-felt med INDHOLD — gul highlighter / post-it så det er kan ses
+    # fra bandet på scenen. Mørk tekst på varm gul = max kontrast.
+    NOTES_HIGHLIGHT_BG = "#fde047"   # varm gul (Tailwind yellow-300)
+    NOTES_HIGHLIGHT_FG = "#1a1a1a"   # næsten sort
+    NOTES_HIGHLIGHT_BORDER = "#ca8a04"  # mørkere gul kant — tydeliggør
 
 
 # ===========================================================================
@@ -318,23 +325,28 @@ class StageMode(tk.Toplevel):
         self.hint_label.pack(side=tk.RIGHT, padx=32, pady=12)
 
         # --- Notes-area (BUNDEN) — pakkes FØR canvas så den ikke overlapper ---
+        # Når der er noter: gul highlighter-banner så bandet kan se det på scenen
+        # Når tom: skjules helt så fokus er på sang-listen
         self.notes_frame = tk.Frame(self, bg=StageColors.NOTES_BG)
-        self.notes_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        # Bemærk: vi pack'er IKKE notes_frame her — det sker dynamisk i
+        # _update_notes() så den helt forsvinder når der ikke er noter
 
-        # En lille divider-linje
-        tk.Frame(self.notes_frame, bg="#252528", height=1).pack(
-            side=tk.TOP, fill=tk.X
+        # Tyk gul kant-stribe på toppen — markerer at noter er VIGTIGE
+        self.notes_border = tk.Frame(
+            self.notes_frame, bg=StageColors.NOTES_HIGHLIGHT_BORDER, height=4,
         )
+        self.notes_border.pack(side=tk.TOP, fill=tk.X)
 
         self.notes_var = tk.StringVar(value="")
         self.notes_label = tk.Label(
             self.notes_frame, textvariable=self.notes_var,
-            bg=StageColors.NOTES_BG, fg=StageColors.NOTES_FG,
+            bg=StageColors.NOTES_HIGHLIGHT_BG,
+            fg=StageColors.NOTES_HIGHLIGHT_FG,
             font=self._font("notes"),
             wraplength=2000, justify="left",
             anchor="w",
         )
-        self.notes_label.pack(fill=tk.BOTH, expand=True, padx=40, pady=14)
+        self.notes_label.pack(fill=tk.BOTH, expand=True, padx=40, pady=18)
 
         # --- Hovedvisning (scrollende sang-liste) ---
         main = tk.Frame(self, bg=StageColors.BG)
@@ -581,11 +593,11 @@ class StageMode(tk.Toplevel):
     # ------------------------------------------------------------------
     def _update_notes(self) -> None:
         if not (0 <= self.current_idx < len(self.items)):
-            self.notes_var.set("")
+            self._hide_notes_banner()
             return
         item = self.items[self.current_idx]
         if is_marker_item(item):
-            self.notes_var.set("")
+            self._hide_notes_banner()
             return
         name = item_song_name(item)
         song = self.model.get_song(name) or new_song(name)
@@ -593,10 +605,25 @@ class StageMode(tk.Toplevel):
         if notes:
             # Erstat newlines med ' · ' for at lave det til én linje på scenen
             one_line = notes.replace("\n", "   ·   ")
-            self.notes_var.set(f"💬  {one_line}")
-            self.notes_label.configure(fg=StageColors.NOTES_FG)
+            self.notes_var.set(f"�  {one_line}")
+            self._show_notes_banner()
         else:
-            self.notes_var.set("")
+            self._hide_notes_banner()
+
+    def _show_notes_banner(self) -> None:
+        """Vis det gule noter-banner i bunden af Stage Mode."""
+        # Pack hvis ikke allerede synligt (idempotent)
+        if not self.notes_frame.winfo_ismapped():
+            self.notes_frame.pack(side=tk.BOTTOM, fill=tk.X)
+            # Re-scroll så current stadig er synlig efter layout-skift
+            self.after_idle(self._scroll_to_current)
+
+    def _hide_notes_banner(self) -> None:
+        """Skjul noter-banneret helt så fokus er på sang-listen."""
+        self.notes_var.set("")
+        if self.notes_frame.winfo_ismapped():
+            self.notes_frame.pack_forget()
+            self.after_idle(self._scroll_to_current)
 
     # ------------------------------------------------------------------
     #  Scroll så current song er omkring 1/3 fra toppen

@@ -2675,6 +2675,73 @@ def test_ndi_renderer_handles_long_notes_with_wrap() -> None:
     print("  ndi_renderer wraps long notes OK")
 
 
+def test_ndi_renderer_notes_use_yellow_highlighter() -> None:
+    """v1.5.4: Noter skal tegnes med GUL highlighter-baggrund (max synlighed).
+
+    Vi tjekker at NotesColors definerer det højlighter-farveskema og at
+    det er den klassiske varme gul (post-it look).
+    """
+    from ndi_renderer import NotesColors
+
+    # Konstanter skal eksistere og være de korrekte gul/mørke værdier
+    assert hasattr(NotesColors, "NOTES_HIGHLIGHT_BG")
+    assert hasattr(NotesColors, "NOTES_HIGHLIGHT_FG")
+    assert hasattr(NotesColors, "NOTES_HIGHLIGHT_BORDER")
+
+    bg_r, bg_g, bg_b = NotesColors.NOTES_HIGHLIGHT_BG
+    # Gul: høj R, høj G, lav B (yellow)
+    assert bg_r > 200 and bg_g > 180 and bg_b < 120, (
+        f"Forventede gul (R>200, G>180, B<120), fik RGB=({bg_r},{bg_g},{bg_b})"
+    )
+
+    fg_r, fg_g, fg_b = NotesColors.NOTES_HIGHLIGHT_FG
+    # Mørk: alle kanaler skal være lave for max kontrast på gul
+    assert fg_r < 60 and fg_g < 60 and fg_b < 60, (
+        f"Forventede mørk forgrundsfarve, fik RGB=({fg_r},{fg_g},{fg_b})"
+    )
+    print("  ndi_renderer notes use yellow highlighter OK")
+
+
+def test_ndi_renderer_renders_notes_box_without_crash() -> None:
+    """Frame med faktiske noter skal rendere uden at fejle (regression-test
+    for v1.5.4's rounded_rectangle kald)."""
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        print("  ndi_renderer notes box (skipped — Pillow mangler)")
+        return
+    from ndi_renderer import render_notes_frame
+    img = render_notes_frame(
+        current_song={
+            "name": "Sang med noter",
+            "key": "G",
+            "duration": "3:45",
+            "notes": "Husk: capo på 2. bånd\nGitarsolo efter 2. omkvæd",
+        },
+        next_song={"name": "Næste sang", "notes": "Hurtigere tempo"},
+        width=1920, height=1080,
+    )
+    assert img is not None
+    assert img.size == (1920, 1080)
+    print("  ndi_renderer renders notes box OK")
+
+
+def test_stage_mode_has_yellow_highlight_colors() -> None:
+    """v1.5.4: Stage Mode skal også have gul highlighter-farver til noter."""
+    if not _TK_OK:
+        print("  stage_mode yellow highlight (skipped — Tk not available)")
+        return
+    from stage_mode import StageColors
+
+    assert hasattr(StageColors, "NOTES_HIGHLIGHT_BG")
+    assert hasattr(StageColors, "NOTES_HIGHLIGHT_FG")
+    assert hasattr(StageColors, "NOTES_HIGHLIGHT_BORDER")
+    # Skal være hex-farver der starter med #
+    assert StageColors.NOTES_HIGHLIGHT_BG.startswith("#")
+    assert StageColors.NOTES_HIGHLIGHT_FG.startswith("#")
+    print("  stage_mode has yellow highlight colors OK")
+
+
 def test_ndi_renderer_get_current_and_next_skips_markers() -> None:
     """get_current_and_next skal springe markører over."""
     from ndi_renderer import get_current_and_next
@@ -3110,6 +3177,9 @@ def run_all() -> None:
         test_ndi_renderer_render_basic_frame,
         test_ndi_renderer_handles_no_current_song,
         test_ndi_renderer_handles_long_notes_with_wrap,
+        test_ndi_renderer_notes_use_yellow_highlighter,
+        test_ndi_renderer_renders_notes_box_without_crash,
+        test_stage_mode_has_yellow_highlight_colors,
         test_ndi_renderer_get_current_and_next_skips_markers,
         test_ndi_window_does_not_crash_when_ndi_unavailable,
         test_ndi_broadcaster_module_loads,

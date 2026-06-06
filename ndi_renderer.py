@@ -43,11 +43,17 @@ class NotesColors:
 
     FG_TITLE = (255, 255, 255)     # sang-titel (knaldhvid)
     FG_META = (170, 170, 175)      # toneart/varighed
-    FG_NOTES = (230, 230, 235)     # noter (lys hvid)
+    FG_NOTES = (230, 230, 235)     # noter (lys hvid) — bruges KUN som fallback
     FG_LABEL = (130, 130, 135)     # "NUVÆRENDE" / "NÆSTE" labels
     FG_MUTED = (90, 90, 95)        # mindre vigtigt
 
     DIVIDER = (40, 40, 45)         # tynd linje mellem paneler
+
+    # Noter-felt — gul highlighter / post-it så de er let synlige i broadcasten
+    # Matcher Stage Mode's NOTES_HIGHLIGHT_BG/FG for konsistens
+    NOTES_HIGHLIGHT_BG = (253, 224, 71)     # varm gul (Tailwind yellow-300)
+    NOTES_HIGHLIGHT_FG = (26, 26, 26)       # næsten sort tekst
+    NOTES_HIGHLIGHT_BORDER = (202, 138, 4)  # mørkere gul kant
 
 
 # ===========================================================================
@@ -335,31 +341,65 @@ def _draw_song_section(
     else:
         cursor_y += int(height_ref * 0.01)
 
-    # Noter (multi-line med wrap)
+    # Noter (multi-line med wrap) — GUL HIGHLIGHTER så de er let synlige
     notes = (song.get("notes") or "").strip()
     if notes:
         notes_size = max(16, int(height_ref * (0.028 if is_current else 0.022)))
         notes_font = _get_font(notes_size)
-        notes_lines = _wrap_text(draw, notes, notes_font, inner_w)
+        notes_lines = _wrap_text(draw, notes, notes_font, inner_w - int(height_ref * 0.025))
         # Hvor mange linjer er der plads til?
         remaining_h = (y + h) - cursor_y - int(height_ref * 0.015)
         line_h = int(notes_size * 1.35)
-        max_lines = max(1, remaining_h // line_h)
-        for line in notes_lines[:max_lines]:
-            draw.text(
-                (inner_x, cursor_y), line,
-                fill=NotesColors.FG_NOTES, font=notes_font,
-            )
-            cursor_y += line_h
-        # "..." hvis vi måtte trunkere
-        if len(notes_lines) > max_lines:
-            draw.text(
-                (inner_x, cursor_y - line_h + int(line_h * 0.6)),
-                "...",
-                fill=NotesColors.FG_MUTED, font=notes_font,
-            )
+        # Plads til highlighter-padding + evt. truncation indikator
+        pad_v = int(notes_size * 0.4)
+        max_lines = max(1, (remaining_h - 2 * pad_v) // line_h)
+        visible_lines = notes_lines[:max_lines]
+        truncated = len(notes_lines) > max_lines
+
+        # === Gul højlighter-boks bag noterne ===
+        if visible_lines:
+            box_h = line_h * len(visible_lines) + 2 * pad_v
+            pad_h = int(height_ref * 0.012)
+            box_x0 = inner_x - pad_h
+            box_y0 = cursor_y - pad_v
+            box_x1 = inner_x + inner_w
+            box_y1 = box_y0 + box_h
+
+            # Fyld + kant — gul highlighter look
+            try:
+                draw.rounded_rectangle(
+                    [box_x0, box_y0, box_x1, box_y1],
+                    radius=max(4, int(height_ref * 0.008)),
+                    fill=NotesColors.NOTES_HIGHLIGHT_BG,
+                    outline=NotesColors.NOTES_HIGHLIGHT_BORDER,
+                    width=max(2, int(height_ref * 0.003)),
+                )
+            except AttributeError:
+                # PIL < 8.2 har ikke rounded_rectangle — fald tilbage
+                draw.rectangle(
+                    [box_x0, box_y0, box_x1, box_y1],
+                    fill=NotesColors.NOTES_HIGHLIGHT_BG,
+                    outline=NotesColors.NOTES_HIGHLIGHT_BORDER,
+                    width=max(2, int(height_ref * 0.003)),
+                )
+
+            # Mørk tekst oven på den gule baggrund
+            for line in visible_lines:
+                draw.text(
+                    (inner_x, cursor_y), line,
+                    fill=NotesColors.NOTES_HIGHLIGHT_FG, font=notes_font,
+                )
+                cursor_y += line_h
+
+            # "..." hvis vi måtte trunkere
+            if truncated:
+                draw.text(
+                    (inner_x, cursor_y - line_h + int(line_h * 0.5)),
+                    "...",
+                    fill=NotesColors.NOTES_HIGHLIGHT_FG, font=notes_font,
+                )
     else:
-        # Ingen noter — vis bare en lille placeholder
+        # Ingen noter — vis bare en lille placeholder (samme som før)
         ph_size = max(14, int(height_ref * 0.02))
         ph_font = _get_font(ph_size, "italic")
         draw.text(
