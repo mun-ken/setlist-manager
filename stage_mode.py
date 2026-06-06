@@ -607,8 +607,30 @@ class StageMode(tk.Toplevel):
             max_y = max(1, inner_h - canvas_h)
             target_y = max(0, min(target_y, max_y))
 
-            fraction = target_y / max_y
+            # VIGTIGT: yview_moveto(fraction) tolker fraction som
+            # "hvor stor en BRØKDEL af inner_h ligger over viewport-toppen".
+            # → viewport_top_pixels = fraction × inner_h
+            # Vi skal derfor dele med inner_h (IKKE max_y!) for at få
+            # viewport-top præcis ved target_y. Tidligere brugte vi max_y
+            # som divisor → scroll-positionen blev (inner_h/max_y)× for
+            # langt nede → toppen af current-row blev klippet.
+            fraction = target_y / inner_h
             self.canvas.yview_moveto(fraction)
+
+            # Sanity-check: verificér at current-row faktisk ER fuldt
+            # synlig efter scroll. Hvis ikke, korrigér med en ekstra
+            # yview_moveto. Ekstra forsigtighed for at fange edge cases
+            # hvor scroll-region eller widget-geometri var stale.
+            try:
+                self.update_idletasks()
+                yview_top_frac, _ = self.canvas.yview()
+                actual_viewport_top = yview_top_frac * inner_h
+                # Hvis viewport-toppen er FOR LANGT NEDE (klipper current's top):
+                if actual_viewport_top > w_y - margin + 1:
+                    corrected_top = max(0, w_y - margin)
+                    self.canvas.yview_moveto(corrected_top / inner_h)
+            except (tk.TclError, ZeroDivisionError, ValueError):
+                pass
         except (tk.TclError, ZeroDivisionError):
             pass
 

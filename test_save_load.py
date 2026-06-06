@@ -2144,6 +2144,114 @@ def test_stage_mode_font_scales_with_window_size() -> None:
         root.destroy()
 
 
+def test_stage_mode_scroll_uses_correct_fraction_formula() -> None:
+    """Regression-test for scroll-bug der klippede toppen af current song.
+
+    yview_moveto(fraction) tolker fraction relativt til den FULDE
+    scroll-region (inner_h), IKKE til max-scrollable (inner_h - canvas_h).
+    Tidligere kode delte target_y med max_y i stedet for inner_h
+    → scroll-position blev (inner_h/max_y)× for langt nede → toppen af
+    current-row blev klippet.
+
+    Vi tester ved at mocke canvas/inner geometri + capture'r hvilken
+    fraction der bliver givet til yview_moveto.
+    """
+    if not _TK_OK:
+        print("  stage_mode scroll formula (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        model = SetlistModel()
+        # 20 sange så vi kan teste scrolling
+        for i in range(20):
+            model.add_song(f"Sang {i+1}")
+        model.current_setlist["songs"] = [f"Sang {i+1}" for i in range(20)]
+
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                return False
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            sm = stage_mode.StageMode(root, model, start_index=10, mode="window")
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+
+        try:
+            # Mock canvas/inner geometri til kendte værdier
+            INNER_H = 2000   # total content height
+            CANVAS_H = 600   # viewport height
+            WIDGET_Y = 900   # current row's y-position i inner
+            WIDGET_H = 130   # current row's height
+
+            # Capture alle yview_moveto-kald
+            calls = []
+            class FakeCanvas:
+                def configure(self, **kw): pass
+                def bbox(self, _): return (0, 0, 100, INNER_H)
+                def winfo_height(self): return CANVAS_H
+                def yview_moveto(self, frac): calls.append(frac)
+                def yview(self): return (calls[-1] if calls else 0.0, 1.0)
+                def yview_scroll(self, n, what): pass
+
+            class FakeInner:
+                def winfo_height(self): return INNER_H
+
+            class FakeWidget:
+                def winfo_y(self): return WIDGET_Y
+                def winfo_height(self): return WIDGET_H
+
+            sm.canvas = FakeCanvas()  # type: ignore[assignment]
+            sm.inner = FakeInner()  # type: ignore[assignment]
+            sm.song_widgets = [FakeWidget()] * 20  # type: ignore[list-item]
+            sm.current_idx = 10
+
+            sm._scroll_to_current()
+
+            assert calls, "yview_moveto blev aldrig kaldt"
+            actual_fraction = calls[0]
+            actual_viewport_top = actual_fraction * INNER_H
+
+            # Current row's top er ved y=900. Toppen MÅ IKKE klippes.
+            # Dvs viewport_top SKAL være ≤ 900 (med en margin).
+            assert actual_viewport_top <= WIDGET_Y, (
+                f"BUG: viewport_top={actual_viewport_top} > widget_y={WIDGET_Y} "
+                f"→ toppen af current-row klippes! "
+                f"Bug-symptom: 'man kan ikke se sangen i live'. "
+                f"Fraction givet til yview_moveto: {actual_fraction}, "
+                f"forventet ≤ {WIDGET_Y/INNER_H:.4f}"
+            )
+
+            # Den GAMLE buggy formel ville give fraction = target_y / max_y
+            # = (900 - 200) / (2000 - 600) = 700/1400 = 0.5
+            # → viewport_top = 0.5 × 2000 = 1000 → WIDGET_Y=900 ville være klippet
+            # Den NYE formel: fraction = target_y / inner_h = 700/2000 = 0.35
+            # → viewport_top = 0.35 × 2000 = 700 → WIDGET_Y=900 ligger 200px nede
+            # i viewport, perfekt synlig.
+            BUGGY_FRACTION = 0.5
+            assert abs(actual_fraction - BUGGY_FRACTION) > 0.05, (
+                f"Fraction {actual_fraction} matcher den GAMLE buggy "
+                f"formel target_y/max_y={BUGGY_FRACTION}. "
+                f"Formlen skal være target_y/inner_h."
+            )
+
+            print(f"  stage_mode scroll formula OK "
+                  f"(fraction={actual_fraction:.4f}, viewport_top={actual_viewport_top:.0f}px)")
+        finally:
+            sm.close()
+    finally:
+        root.destroy()
+
+
 # ===========================================================================
 def run_all() -> None:
     tests = [
@@ -2250,6 +2358,7 @@ def run_all() -> None:
         test_stage_mode_go_to_song_number,
         test_stage_mode_supports_window_mode,
         test_stage_mode_font_scales_with_window_size,
+        test_stage_mode_scroll_uses_correct_fraction_formula,
     ]
     print(f"Running {len(tests)} tests...")
     for t in tests:
