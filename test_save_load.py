@@ -3110,6 +3110,294 @@ def test_web_server_status_listener_called() -> None:
     print("  web_server status listener OK")
 
 
+# ===========================================================================
+#  Stream Deck / Companion control-API tests (v1.5.8)
+# ===========================================================================
+def test_web_server_action_next_skips_markers() -> None:
+    """action_next skal hoppe over markører."""
+    from web_server import WebServer
+    from setlist_model import SetlistModel, make_marker
+
+    m = SetlistModel()
+    for n in ["A", "B", "C"]:
+        m.add_song(n)
+    m.current_setlist["songs"] = ["A", make_marker("PAUSE"), "B", "C"]
+
+    ws = WebServer(m, port=18780)
+    # ws.start() ikke nødvendigt — action_next bruger kun model
+
+    # Start på idx=0 (A) — next skal være idx=2 (B, markøren springes over)
+    ws._current_idx = 0
+    new_idx = ws.action_next()
+    assert new_idx == 2, f"Forventede idx=2 (B, skip markør), fik {new_idx}"
+
+    # Næste igen: idx=3 (C)
+    new_idx = ws.action_next()
+    assert new_idx == 3
+
+    # Næste igen: vi er på sidste sang — skal returnere current uændret
+    new_idx = ws.action_next()
+    assert new_idx == 3, "Skal være uændret på sidste sang"
+    print("  web_server action_next OK")
+
+
+def test_web_server_action_prev_skips_markers() -> None:
+    """action_prev skal hoppe baglæns over markører."""
+    from web_server import WebServer
+    from setlist_model import SetlistModel, make_marker
+
+    m = SetlistModel()
+    for n in ["A", "B", "C"]:
+        m.add_song(n)
+    m.current_setlist["songs"] = ["A", make_marker("PAUSE"), "B", "C"]
+
+    ws = WebServer(m, port=18781)
+    ws._current_idx = 3  # vi er på C
+    new_idx = ws.action_prev()
+    assert new_idx == 2, "Forrige fra C skal være B"
+
+    new_idx = ws.action_prev()
+    assert new_idx == 0, f"Forrige fra B skal være A (skip markør), fik {new_idx}"
+
+    new_idx = ws.action_prev()
+    assert new_idx == 0, "På første sang skal være uændret"
+    print("  web_server action_prev OK")
+
+
+def test_web_server_action_goto_num_is_one_based_and_ignores_markers() -> None:
+    """action_goto_num(3) → 3. sang (ignorerer markører i optællingen)."""
+    from web_server import WebServer
+    from setlist_model import SetlistModel, make_marker
+
+    m = SetlistModel()
+    for n in ["A", "B", "C", "D"]:
+        m.add_song(n)
+    m.current_setlist["songs"] = ["A", make_marker("PAUSE"), "B", "C", "D"]
+
+    ws = WebServer(m, port=18782)
+
+    # Sang #1 = A (idx 0)
+    assert ws.action_goto_num(1) == 0
+    # Sang #2 = B (idx 2 — markøren ignoreres i optællingen)
+    assert ws.action_goto_num(2) == 2
+    # Sang #3 = C (idx 3)
+    assert ws.action_goto_num(3) == 3
+    # Sang #4 = D (idx 4)
+    assert ws.action_goto_num(4) == 4
+    # Sang #99 ud over grænsen → ingen ændring (forbliver på sidste set)
+    ws._current_idx = 4
+    assert ws.action_goto_num(99) == 4
+    print("  web_server action_goto_num OK")
+
+
+def test_web_server_action_callback_fires_with_correct_params() -> None:
+    """Når action udføres skal callback kaldes med (action, {idx, num})."""
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    for n in ["A", "B", "C"]:
+        m.add_song(n)
+    m.current_setlist["songs"] = ["A", "B", "C"]
+
+    received = []
+    def cb(action, params):
+        received.append((action, dict(params)))
+
+    ws = WebServer(m, port=18783, action_callback=cb)
+    try:
+        ws.start()
+        port = ws.get_port()
+        urllib.request.urlopen(f"http://localhost:{port}/api/next", timeout=2).read()
+        urllib.request.urlopen(f"http://localhost:{port}/api/goto/3", timeout=2).read()
+        urllib.request.urlopen(f"http://localhost:{port}/api/prev", timeout=2).read()
+    finally:
+        ws.stop()
+
+    assert len(received) == 3, f"Forventede 3 callbacks, fik {len(received)}"
+    assert received[0][0] == "next"
+    assert received[0][1]["idx"] == 1
+    assert received[1][0] == "goto"
+    assert received[1][1]["num"] == 3
+    assert received[1][1]["idx"] == 2
+    assert received[2][0] == "prev"
+    print("  web_server action callback OK")
+
+
+def test_web_server_api_next_prev_goto_endpoints_return_json() -> None:
+    """HTTP-endpoints skal returnere korrekt JSON med ok=True + current_song."""
+    import json
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    for n in ["First", "Second", "Third"]:
+        m.add_song(n, "3:00", "C", "")
+    m.current_setlist["songs"] = ["First", "Second", "Third"]
+
+    ws = WebServer(m, port=18784)
+    try:
+        ws.start()
+        port = ws.get_port()
+
+        # /api/next
+        with urllib.request.urlopen(f"http://localhost:{port}/api/next", timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        assert data["ok"] is True
+        assert data["action"] == "next"
+        assert data["current_idx"] == 1
+        assert data["current_song"]["name"] == "Second"
+        assert data["next_song"]["name"] == "Third"
+
+        # /api/goto/1
+        with urllib.request.urlopen(f"http://localhost:{port}/api/goto/1", timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        assert data["current_song"]["name"] == "First"
+        assert data["current_num"] == 1
+        assert data["total_songs"] == 3
+
+        # /api/prev — på First, ingen ændring
+        with urllib.request.urlopen(f"http://localhost:{port}/api/prev", timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        assert data["current_song"]["name"] == "First"
+    finally:
+        ws.stop()
+    print("  web_server action endpoints return JSON OK")
+
+
+def test_web_server_api_post_method_works_for_actions() -> None:
+    """Companion kan sende POST i stedet for GET — skal virke."""
+    import json
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    for n in ["A", "B"]:
+        m.add_song(n)
+    m.current_setlist["songs"] = ["A", "B"]
+
+    ws = WebServer(m, port=18785)
+    try:
+        ws.start()
+        port = ws.get_port()
+        req = urllib.request.Request(
+            f"http://localhost:{port}/api/next",
+            method="POST",
+            data=b"",
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            assert r.status == 200
+            data = json.loads(r.read().decode("utf-8"))
+        assert data["current_song"]["name"] == "B"
+    finally:
+        ws.stop()
+    print("  web_server POST for actions OK")
+
+
+def test_web_server_api_goto_invalid_num_returns_400() -> None:
+    """/api/goto/abc skal returnere HTTP 400."""
+    import urllib.request
+    import urllib.error
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("X"); m.current_setlist["songs"] = ["X"]
+    ws = WebServer(m, port=18786)
+    try:
+        ws.start()
+        port = ws.get_port()
+        try:
+            urllib.request.urlopen(f"http://localhost:{port}/api/goto/abc", timeout=2).read()
+            assert False, "Skulle have fået HTTPError 400"
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, f"Forventede 400, fik {e.code}"
+    finally:
+        ws.stop()
+    print("  web_server bad /api/goto returns 400 OK")
+
+
+def test_web_server_api_current_returns_compact_json() -> None:
+    """/api/current skal være kompakt — ideelt til Companion polling-feedback."""
+    import json
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("My Song", "3:45", "Am", "Some notes")
+    m.add_song("Next Up", "4:00", "C", "")
+    m.current_setlist["songs"] = ["My Song", "Next Up"]
+
+    ws = WebServer(m, port=18787)
+    try:
+        ws.start()
+        port = ws.get_port()
+        with urllib.request.urlopen(f"http://localhost:{port}/api/current", timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        assert data["name"] == "My Song"
+        assert data["key"] == "Am"
+        assert data["duration"] == "3:45"
+        assert data["notes"] == "Some notes"
+        assert data["num"] == 1
+        assert data["total"] == 2
+        assert data["next_name"] == "Next Up"
+        assert data["next_key"] == "C"
+    finally:
+        ws.stop()
+    print("  web_server /api/current OK")
+
+
+def test_web_server_api_endpoints_have_cors_header() -> None:
+    """JSON endpoints skal returnere CORS-header så Companion kan ramme dem."""
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("X"); m.current_setlist["songs"] = ["X"]
+    ws = WebServer(m, port=18788)
+    try:
+        ws.start()
+        port = ws.get_port()
+        with urllib.request.urlopen(f"http://localhost:{port}/api/current", timeout=2) as r:
+            assert r.headers.get("Access-Control-Allow-Origin") == "*"
+        with urllib.request.urlopen(f"http://localhost:{port}/api/next", timeout=2) as r:
+            assert r.headers.get("Access-Control-Allow-Origin") == "*"
+    finally:
+        ws.stop()
+    print("  web_server CORS headers OK")
+
+
+def test_web_server_actions_with_empty_setlist_return_409() -> None:
+    """Hvis setlisten er tom skal /api/next returnere 409 (Conflict)."""
+    import urllib.request
+    import urllib.error
+    import json
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()  # ingen sange
+    ws = WebServer(m, port=18789)
+    try:
+        ws.start()
+        port = ws.get_port()
+        try:
+            urllib.request.urlopen(f"http://localhost:{port}/api/next", timeout=2).read()
+            assert False, "Skulle have fået 409"
+        except urllib.error.HTTPError as e:
+            assert e.code == 409
+            body = json.loads(e.read().decode("utf-8"))
+            assert body["ok"] is False
+            assert body["error"] == "no_setlist"
+    finally:
+        ws.stop()
+    print("  web_server empty setlist returns 409 OK")
+
+
 def test_ndi_renderer_get_current_and_next_skips_markers() -> None:
     """get_current_and_next skal springe markører over."""
     from ndi_renderer import get_current_and_next

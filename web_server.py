@@ -16,11 +16,17 @@ URLs:
   /notes         → setliste med noter (samme indhold som NDI)
   /events        → SSE-stream af live-updates
   /api/state     → JSON snapshot (debug + initial load)
+  /api/current   → kompakt JSON (kun current+next) — ideelt til Companion polling
+
+Control-endpoints (GET eller POST — Stream Deck / Bitfocus Companion):
+  /api/next       → hop til næste sang
+  /api/prev       → hop til forrige sang
+  /api/goto/<n>   → hop til sang #N (1-baseret, ignorerer markører)
 
 Sikkerhed:
 * Binder kun på 0.0.0.0:8765 (lokal port) — kun samme netværk
-* INGEN write-endpoints — kun læse-adgang
-* Ingen authentication (read-only på lokalnet vurderet OK for bandet)
+* INGEN destruktive endpoints — kan kun navigere mellem eksisterende sange
+* Ingen authentication (read+navigate på lokalnet vurderet OK for bandet)
 """
 
 from __future__ import annotations
@@ -738,6 +744,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = urlparse(self.path).path
         try:
+            if self._route_action(path):
+                return
             if path == "/":
                 self._render_index()
             elif path == "/setlist":
@@ -748,6 +756,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 self._stream_events()
             elif path == "/api/state":
                 self._render_state_json()
+            elif path == "/api/current":
+                self._render_current_json()
             elif path == "/favicon.ico":
                 self.send_response(204)
                 self.end_headers()
@@ -756,6 +766,72 @@ class _RequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             # Klient lukkede forbindelsen — helt normalt, ignorér
             pass
+
+    def do_POST(self):  # noqa: N802
+        """Action-endpoints kan også kaldes via POST (nogle clients foretrækker det)."""
+        path = urlparse(self.path).path
+        try:
+            if self._route_action(path):
+                return
+            self.send_error(405, "Method not allowed — brug POST kun på /api/next, /api/prev, /api/goto/<n>")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _route_action(self, path: str) -> bool:
+        """Forsøg at route'e path som control-action.
+
+        Returnerer True hvis path blev håndteret (også ved fejl), False hvis
+        path ikke er et action-endpoint og skal route'es videre.
+        """
+        if path == "/api/next":
+            self._handle_action("next", {})
+            return True
+        if path == "/api/prev":
+            self._handle_action("prev", {})
+            return True
+        if path.startswith("/api/goto/"):
+            tail = path[len("/api/goto/"):]
+            try:
+                num = int(tail)
+            except ValueError:
+                self._send_json({"ok": False, "error": "bad_num"}, status=400)
+                return True
+            self._handle_action("goto", {"num": num})
+            return True
+        return False
+
+    def _handle_action(self, action: str, params: dict):
+        """Udfør control-action og svar med ny state som JSON."""
+        server = self.server_app
+        songs = server.model.current_setlist.get("songs", [])
+        if not songs:
+            self._send_json({"ok": False, "error": "no_setlist"}, status=409)
+            return
+
+        if action == "next":
+            new_idx = server.action_next()
+        elif action == "prev":
+            new_idx = server.action_prev()
+        elif action == "goto":
+            new_idx = server.action_goto_num(params.get("num", 0))
+        else:
+            self.send_error(404)
+            return
+
+        # Underret main-app så listbox + NDI også opdateres
+        server._fire_action_callback(action, {"idx": new_idx, "num": params.get("num")})
+
+        # Respondér med kompakt status
+        state = server._snapshot()
+        self._send_json({
+            "ok": True,
+            "action": action,
+            "current_idx": new_idx,
+            "current_num": state.get("current_num", 0),
+            "total_songs": state.get("total_songs", 0),
+            "current_song": state.get("current_song"),
+            "next_song": state.get("next_song"),
+        })
 
     # --- pages ----------------------------------------------------------
     def _render_index(self):
@@ -850,6 +926,36 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_json(self, payload: dict, status: int = 200):
+        """Send JSON-respons med CORS-headers (så Companion kan ramme os)."""
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        # CORS: tillad alle origins (vi er local-only alligevel)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _render_current_json(self):
+        """Lille JSON med kun current+next sang — ideelt til Companion polling."""
+        state = self.server_app._snapshot()
+        cur = state.get("current_song") or {}
+        nxt = state.get("next_song") or {}
+        payload = {
+            "name": cur.get("name", ""),
+            "key": cur.get("key", ""),
+            "duration": cur.get("duration", ""),
+            "notes": cur.get("notes", ""),
+            "num": state.get("current_num", 0),
+            "total": state.get("total_songs", 0),
+            "next_name": nxt.get("name", "") if nxt else "",
+            "next_key": nxt.get("key", "") if nxt else "",
+        }
+        self._send_json(payload)
+
 
 # ===========================================================================
 #  WebServer — facade brugt af main app
@@ -869,6 +975,7 @@ class WebServer:
         self,
         model: SetlistModel,
         port: int = DEFAULT_PORT,
+        action_callback: Optional[Callable[[str, dict], None]] = None,
     ) -> None:
         self.model = model
         self.port = port
@@ -881,6 +988,12 @@ class WebServer:
 
         # Status-listeners (kaldes ved start/stop) — bruges af topbar-indikator
         self._status_listeners: List[Callable[[], None]] = []
+
+        # Action-callback — kaldes når Stream Deck/Companion trykker en knap
+        # (action="next"|"prev"|"goto", params={"idx": int, "num": int|None})
+        # Bruges af main-app til at synkronisere listbox + NDI.
+        # NB: Callback kaldes fra HTTP-thread — skal selv bounce til UI-thread!
+        self._action_callback = action_callback
 
     # ------------------------------------------------------------------
     def add_status_listener(self, cb: Callable[[], None]) -> None:
@@ -942,6 +1055,63 @@ class WebServer:
         if idx != self._current_idx:
             self._current_idx = idx
         self._broadcast_state()
+
+    # ------------------------------------------------------------------
+    # Action-API — bruges af /api/next, /api/prev, /api/goto endpoints
+    # (Stream Deck / Bitfocus Companion / hvilket-som-helst HTTP-værktøj)
+    # ------------------------------------------------------------------
+    def action_next(self) -> int:
+        """Hop til næste sang (springer markører over).
+
+        Returnerer det nye current_idx (eller current hvis vi var på sidste sang).
+        """
+        items = self.model.current_setlist.get("songs", [])
+        if not items:
+            return self._current_idx
+        new_idx = self._current_idx + 1
+        while new_idx < len(items) and is_marker_item(items[new_idx]):
+            new_idx += 1
+        if new_idx >= len(items):
+            return self._current_idx  # ingen flere sange
+        self.set_current_index(new_idx)
+        return self._current_idx
+
+    def action_prev(self) -> int:
+        """Hop til forrige sang (springer markører over)."""
+        items = self.model.current_setlist.get("songs", [])
+        if not items:
+            return self._current_idx
+        new_idx = self._current_idx - 1
+        while new_idx >= 0 and is_marker_item(items[new_idx]):
+            new_idx -= 1
+        if new_idx < 0:
+            return self._current_idx  # vi var på første sang
+        self.set_current_index(new_idx)
+        return self._current_idx
+
+    def action_goto_num(self, num: int) -> int:
+        """Hop til sang #num (1-baseret, ignorerer markører).
+
+        Eksempel: action_goto_num(3) → 3. sang i setlisten (ignorerer pauser).
+        """
+        items = self.model.current_setlist.get("songs", [])
+        song_count = 0
+        for i, item in enumerate(items):
+            if not is_marker_item(item):
+                song_count += 1
+                if song_count == num:
+                    self.set_current_index(i)
+                    return self._current_idx
+        return self._current_idx  # num for stor — ingen ændring
+
+    def _fire_action_callback(self, action: str, params: dict) -> None:
+        """Underret main-app om action (fire-and-forget, exceptions sluges)."""
+        if self._action_callback is None:
+            return
+        try:
+            self._action_callback(action, params)
+        except Exception as e:  # noqa: BLE001
+            print(f"[WebServer] action callback fejl: {e}")
 
     def notify_model_changed(self) -> None:
         """Kaldes når setlisten selv er ændret (ny sang tilføjet, etc.)."""

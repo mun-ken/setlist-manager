@@ -2403,9 +2403,49 @@ class SetlistApp:
         """Lazy-opret den globale WebServer første gang den bruges."""
         if self._web_server is None:
             from web_server import WebServer
-            self._web_server = WebServer(self.model)
+            self._web_server = WebServer(
+                self.model,
+                action_callback=self._on_web_action_threadsafe,
+            )
             self._web_server.add_status_listener(self._update_web_status_display)
         return self._web_server
+
+    def _on_web_action_threadsafe(self, action: str, params: dict) -> None:
+        """Kaldes fra web-server HTTP-thread når Companion/Stream Deck trykker en knap.
+
+        Web-serveren har ALLEREDE opdateret sin egen current_idx + broadcastet
+        til telefoner. Vi skal bare opdatere listbox + NDI så hovedappen
+        følger med visuelt. Bouncer til Tk main-thread via root.after().
+        """
+        try:
+            idx = int(params.get("idx", 0))
+        except (ValueError, TypeError):
+            return
+        try:
+            self.root.after(0, self._handle_web_action_ui, idx)
+        except (tk.TclError, RuntimeError):
+            pass  # root lukket eller ikke klar
+
+    def _handle_web_action_ui(self, idx: int) -> None:
+        """Kører på Tk main-thread — sikkert at røre Tk-widgets her.
+
+        Opdaterer listbox + fyrer normal selection-event så NDI også
+        synkroniserer (det er allerede skrevet til at handle dette).
+        """
+        try:
+            self.set_listbox.selection_clear(0, tk.END)
+            self.set_listbox.selection_set(idx)
+            self.set_listbox.activate(idx)
+            self.set_listbox.see(idx)
+        except (tk.TclError, AttributeError):
+            return
+        # Fyr normal sync så NDI broadcaster også får besked.
+        # (Web-serveren er allerede opdateret af action_next/prev/goto.)
+        try:
+            if self._ndi_broadcaster is not None and self._ndi_broadcaster.is_active():
+                self._ndi_broadcaster.set_current_index(idx)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _current_song_idx(self) -> int:
         """Hent nuværende valgte sang-index (0-baseret) fra setlisten."""
@@ -2514,6 +2554,8 @@ class SetlistApp:
             return
         urls = self._web_server.get_urls()
         url_text = "\n".join(f"   {u}" for u in urls)
+        # Find primær LAN-URL (den bandet/Stream Deck skal bruge)
+        primary = next((u for u in urls if not u.startswith("http://localhost")), urls[0])
         intro = (
             "Web-visningen kører nu! 🎉\n\n"
             if first_time else
@@ -2525,9 +2567,15 @@ class SetlistApp:
             "   Åbn én af adresserne i deres browser og vælg visning:\n"
             "   • 📋 Kun setliste — rene sangtitler\n"
             "   • 📝 Med noter — sang + noter (som NDI)\n\n"
-            "Siden opdaterer sig automatisk når du skifter sang her."
+            "🎛 Stream Deck / Bitfocus Companion:\n"
+            "   Brug 'Generic HTTP'-modul → 'GET request' med disse URL'er:\n"
+            f"   • Næste sang:    {primary}/api/next\n"
+            f"   • Forrige sang:  {primary}/api/prev\n"
+            f"   • Gå til sang 3: {primary}/api/goto/3\n"
+            f"   • Vis aktuel:    {primary}/api/current  (JSON til feedback)\n\n"
+            "Siden + NDI + listbox opdaterer sig automatisk når du skifter."
         )
-        messagebox.showinfo("🌐 Web-visning", body, parent=self.root)
+        messagebox.showinfo("🌐 Web-visning + 🎛 Stream Deck", body, parent=self.root)
 
     def show_ndi_help(self) -> None:
         """Vis dialog med info om hvad NDI er + hvordan man bruger det."""
