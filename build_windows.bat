@@ -1,7 +1,7 @@
 @echo off
 REM =====================================================================
 REM  Setlist Manager - One-click Windows build
-REM  Builds dist\SetlistManager.exe (standalone single-file).
+REM  Builds dist\SetlistManager\ (onedir distribution med alle DLL'er).
 REM
 REM  Hvis Python ikke er installeret, tilbyder scriptet at installere
 REM  det automatisk - du behoever ikke gore noget selv.
@@ -132,24 +132,27 @@ if errorlevel 1 (
 )
 
 echo.
-if exist dist\SetlistManager.exe (
+if exist dist\SetlistManager\SetlistManager.exe (
     REM Hent version fra version.py for at vise den i output
     for /f "delims=" %%V in ('python -c "from version import APP_VERSION; print(APP_VERSION)"') do set "APP_VERSION=%%V"
 
     echo ============================================================
     echo  BUILD OK!  Version: %APP_VERSION%
-    echo  Fil: %cd%\dist\SetlistManager.exe
+    echo  Mappe: %cd%\dist\SetlistManager\
+    echo  EXE:   %cd%\dist\SetlistManager\SetlistManager.exe
     echo.
-    echo  Du kan koere SetlistManager.exe direkte (dobbeltklik den).
+    echo  Du kan koere SetlistManager.exe direkte (dobbeltklik den i
+    echo  mappen ovenfor — den HELE mappe skal flyttes sammen, ikke
+    echo  bare den ene .exe-fil!).
     echo.
-    echo  For at lave en rigtig installer-fil:
+    echo  For at lave en rigtig installer-fil (anbefales!):
     echo    1. Installer Inno Setup 6 fra https://jrsoftware.org/isinfo.php
     echo    2. Hojreklik installer.iss -^> "Compile"
     echo       (versionen bliver automatisk taget fra APP_VERSION env-var)
     echo    3. Find SetlistManagerSetup.exe i Output\ mappen
     echo ============================================================
 ) else (
-    echo BUILD FEJLEDE - dist\SetlistManager.exe blev ikke oprettet.
+    echo BUILD FEJLEDE - dist\SetlistManager\SetlistManager.exe blev ikke oprettet.
     exit /b 1
 )
 

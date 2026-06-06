@@ -56,8 +56,12 @@ Name: "danish";  MessagesFile: "compiler:Languages\Danish.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "README.md";            DestDir: "{app}"; Flags: ignoreversion
+; --onedir output: HELE dist\SetlistManager\ mappen kopieres til {app}.
+; Det inkluderer SetlistManager.exe + python312.dll + _internal\* osv.
+; Brugeren mærker intet — de dobbeltklikker bare "Setlist Manager"
+; genvejen i Start-menuen som peger på SetlistManager.exe.
+Source: "dist\SetlistManager\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "README.md";             DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}";           Filename: "{app}\{#MyAppExeName}"
