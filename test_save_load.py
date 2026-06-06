@@ -2745,6 +2745,245 @@ def test_ndi_window_does_not_crash_when_ndi_unavailable() -> None:
 
 
 # ===========================================================================
+# v1.5.3: NDIBroadcaster — headless broadcast der lever uafhængigt af UI
+# ===========================================================================
+def test_ndi_broadcaster_module_loads() -> None:
+    """Selve modulet skal kunne importeres (det skal ikke kræve at NDI er installeret).
+
+    Modulet importerer tkinter på top-niveau, så vi skipper hvis Tk ikke
+    er tilgængeligt (matcher mønstret for de andre Tk-afhængige tests).
+    """
+    if not _TK_OK:
+        print("  ndi_broadcaster module (skipped — Tk not available)")
+        return
+    import ndi_broadcaster
+    assert hasattr(ndi_broadcaster, "NDIBroadcaster")
+    assert hasattr(ndi_broadcaster, "MODE_NOTES")
+    assert hasattr(ndi_broadcaster, "MODE_STAGE_CAPTURE")
+    assert ndi_broadcaster.MODE_NOTES == "notes"
+    assert ndi_broadcaster.MODE_STAGE_CAPTURE == "stage_capture"
+    print("  ndi_broadcaster module loads OK")
+
+
+def test_ndi_broadcaster_initial_state_is_inactive() -> None:
+    """Friskt oprettet broadcaster må ikke være aktiv før start() kaldes."""
+    if not _TK_OK:
+        print("  ndi_broadcaster state (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    from ndi_broadcaster import NDIBroadcaster
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        bc = NDIBroadcaster(root, SetlistModel())
+        assert bc.is_active() is False
+        assert bc.get_mode() is None
+        assert bc.get_ndi_name() == ""
+        assert bc.get_last_error() == ""
+        assert bc.get_current_index() == 0
+        assert bc.get_last_frame() is None
+        print("  ndi_broadcaster initial state OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_ndi_broadcaster_start_fails_gracefully_without_ndi() -> None:
+    """Hvis NDI ikke er tilgængeligt skal start() returnere False og
+    sætte _last_error — ikke crashe."""
+    if not _TK_OK:
+        print("  ndi_broadcaster start-fail (skipped — Tk not available)")
+        return
+
+    import ndi_output
+    if ndi_output.is_available():
+        print("  ndi_broadcaster start-fail (skipped — NDI faktisk installeret)")
+        return
+
+    import tkinter as tk
+    from ndi_broadcaster import NDIBroadcaster, MODE_NOTES
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        bc = NDIBroadcaster(root, SetlistModel())
+        ok = bc.start(mode=MODE_NOTES, ndi_name="Test")
+        assert ok is False, "start() skal returnere False når NDI mangler"
+        assert bc.is_active() is False
+        err = bc.get_last_error()
+        assert err, "Skal have sat en hjælpsom fejlbesked"
+        assert "NDI" in err
+        print("  ndi_broadcaster start fails gracefully OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_ndi_broadcaster_status_listener_called_on_failed_start() -> None:
+    """Status-listeners (status-indikator i topbaren) skal kaldes når
+    state ændrer sig — også når start fejler."""
+    if not _TK_OK:
+        print("  ndi_broadcaster listener (skipped — Tk not available)")
+        return
+
+    import ndi_output
+    if ndi_output.is_available():
+        print("  ndi_broadcaster listener (skipped — NDI faktisk installeret)")
+        return
+
+    import tkinter as tk
+    from ndi_broadcaster import NDIBroadcaster, MODE_NOTES
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        bc = NDIBroadcaster(root, SetlistModel())
+
+        call_count = [0]
+        def on_status():
+            call_count[0] += 1
+
+        bc.add_status_listener(on_status)
+        bc.start(mode=MODE_NOTES, ndi_name="Test")  # vil fejle
+
+        # Mindst én notify skal være sket (fra failed start)
+        assert call_count[0] >= 1, (
+            f"status listener skal kaldes når start fejler, "
+            f"fik {call_count[0]} kald"
+        )
+
+        # Remove + verify den ikke kaldes mere
+        bc.remove_status_listener(on_status)
+        before = call_count[0]
+        bc.stop()  # extra notify, men listener er fjernet
+        assert call_count[0] == before, "fjernet listener må ikke kaldes mere"
+        print("  ndi_broadcaster status listener OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_ndi_broadcaster_set_current_index_skips_markers() -> None:
+    """set_current_index() skal springe over markører automatisk."""
+    if not _TK_OK:
+        print("  ndi_broadcaster skip-markers (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    from ndi_broadcaster import NDIBroadcaster
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        model = SetlistModel()
+        # Setup: sang, MARKØR, sang, sang
+        model.add_song("Sang A")
+        model.add_song("Sang B")
+        model.add_song("Sang C")
+        model.current_setlist["songs"] = [
+            "Sang A",
+            {"_marker": True, "text": "Ekstra"},
+            "Sang B",
+            "Sang C",
+        ]
+        bc = NDIBroadcaster(root, model)
+
+        # Bedes om idx=1 (markøren) — skal hoppe til idx=2 (Sang B)
+        bc.set_current_index(1)
+        assert bc.get_current_index() == 2, (
+            f"forventede idx=2 (Sang B), fik {bc.get_current_index()}"
+        )
+
+        # idx=0 er en sang — skal forblive 0
+        bc.set_current_index(0)
+        assert bc.get_current_index() == 0
+
+        # idx=3 (Sang C) — skal forblive 3
+        bc.set_current_index(3)
+        assert bc.get_current_index() == 3
+        print("  ndi_broadcaster set_current_index skips markers OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_ndi_broadcaster_stop_is_idempotent() -> None:
+    """Det skal være sikkert at kalde stop() flere gange (selv uden start)."""
+    if not _TK_OK:
+        print("  ndi_broadcaster stop idempotent (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    from ndi_broadcaster import NDIBroadcaster
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        bc = NDIBroadcaster(root, SetlistModel())
+        # Stop uden tidligere start — skal ikke crashe
+        bc.stop()
+        bc.stop()
+        bc.stop()
+        assert bc.is_active() is False
+        print("  ndi_broadcaster stop idempotent OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_ndi_broadcaster_frame_listener_can_be_removed() -> None:
+    """Frame-listeners bruges af preview-vindue der lukker — vi skal kunne
+    fjerne dem rent så vinduet kan lukke uden at lække."""
+    if not _TK_OK:
+        print("  ndi_broadcaster frame listener (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    from ndi_broadcaster import NDIBroadcaster
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        bc = NDIBroadcaster(root, SetlistModel())
+
+        def on_frame(img):
+            pass
+
+        bc.add_frame_listener(on_frame)
+        assert on_frame in bc._frame_listeners
+
+        bc.remove_frame_listener(on_frame)
+        assert on_frame not in bc._frame_listeners
+
+        # remove på noget der ikke findes — skal ikke crashe
+        bc.remove_frame_listener(on_frame)
+        print("  ndi_broadcaster frame listener removal OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+# ===========================================================================
 def run_all() -> None:
     tests = [
         test_basic_save_load_roundtrip,
@@ -2873,6 +3112,13 @@ def run_all() -> None:
         test_ndi_renderer_handles_long_notes_with_wrap,
         test_ndi_renderer_get_current_and_next_skips_markers,
         test_ndi_window_does_not_crash_when_ndi_unavailable,
+        test_ndi_broadcaster_module_loads,
+        test_ndi_broadcaster_initial_state_is_inactive,
+        test_ndi_broadcaster_start_fails_gracefully_without_ndi,
+        test_ndi_broadcaster_status_listener_called_on_failed_start,
+        test_ndi_broadcaster_set_current_index_skips_markers,
+        test_ndi_broadcaster_stop_is_idempotent,
+        test_ndi_broadcaster_frame_listener_can_be_removed,
     ]
     print(f"Running {len(tests)} tests...")
     for t in tests:

@@ -1582,6 +1582,11 @@ class SetlistApp:
         self._autosave_job: str | None = None
         self._drag_index: int | None = None
 
+        # NDI broadcaster — kører headless i baggrunden uafhængigt af UI-vinduer
+        # (oprettes lazy så app stadig kan starte uden NDI installeret)
+        self._ndi_broadcaster = None  # type: ignore[assignment]
+        self._ndi_preview_window = None  # type: ignore[assignment]
+
         self._build_menu()
         self._build_top_bar()
         self._build_main_area()
@@ -1641,6 +1646,10 @@ class SetlistApp:
             command=self.open_ndi_notes,
         )
         m_live.add_command(
+            label="⏹  Stop NDI broadcast",
+            command=self.stop_ndi_broadcast,
+        )
+        m_live.add_command(
             label="❓ Om NDI / fejlfinding",
             command=self.show_ndi_help,
         )
@@ -1698,6 +1707,22 @@ class SetlistApp:
             text="🔍 Søg i alle bands…",
             command=self.open_search_all_bands,
         ).pack(side=tk.LEFT, padx=(16, 2))
+
+        # NDI status-indikator helt til højre i band-rækken — synlig overalt
+        # Tom når NDI er off, viser "📡 NDI LIVE 'Navn'" når aktiv
+        self.ndi_status_var = tk.StringVar(value="")
+        self.ndi_status_label = tk.Label(
+            row1,
+            textvariable=self.ndi_status_var,
+            font=("Segoe UI", 10, "bold"),
+            fg="#d70015",  # rød = LIVE on-air signal
+            bg=row1.tk.call("ttk::style", "lookup", "TFrame", "-background")
+                or "#f0f0f0",
+            cursor="hand2",
+        )
+        self.ndi_status_label.pack(side=tk.RIGHT, padx=(8, 8))
+        # Klik på indikatoren = åbn preview-vindue
+        self.ndi_status_label.bind("<Button-1>", lambda e: self._on_ndi_status_click())
 
         # Row 2: Setlist
         row2 = ttk.Frame(wrap)
@@ -1997,15 +2022,82 @@ class SetlistApp:
     # ------------------------------------------------------------------
     #  NDI broadcast (til OBS/vMix/ATEM)
     # ------------------------------------------------------------------
-    def open_ndi_notes(self) -> None:
-        """Åbn det separate 'NDI Notes' vindue.
+    def _ensure_ndi_broadcaster(self):
+        """Lazy-opret den globale NDIBroadcaster første gang den bruges."""
+        if self._ndi_broadcaster is None:
+            from ndi_broadcaster import NDIBroadcaster
+            self._ndi_broadcaster = NDIBroadcaster(self.root, self.model)
+            self._ndi_broadcaster.add_status_listener(self._update_ndi_status_display)
+        return self._ndi_broadcaster
 
-        Streamer en pænt formateret notes-frame over NDI med nuværende
-        sang + næste sang. Broadcaster ser det i OBS som en kilde.
+    def _update_ndi_status_display(self) -> None:
+        """Opdater den røde 'NDI LIVE' indikator i topbaren.
+
+        Kaldes af broadcaster hver gang den starter/stopper/får fejl.
+        """
+        if not hasattr(self, "ndi_status_var"):
+            return  # UI ikke klar endnu
+        try:
+            bc = self._ndi_broadcaster
+            if bc is None or not bc.is_active():
+                self.ndi_status_var.set("")
+            elif bc.get_last_error():
+                self.ndi_status_var.set(f"⚠ NDI fejl")
+                self.ndi_status_label.configure(fg="#ff9500")
+            else:
+                name = bc.get_ndi_name() or "Setlist Manager"
+                self.ndi_status_var.set(f"📡 NDI LIVE  '{name}'")
+                self.ndi_status_label.configure(fg="#d70015")
+        except tk.TclError:
+            pass  # vinduet er ved at lukke
+
+    def _on_ndi_status_click(self) -> None:
+        """Når brugeren klikker på NDI status-indikatoren.
+
+        - Aktiv broadcast: åbn/foku­sér preview-vinduet
+        - Ingen broadcast: åbn NDI hjælpe-dialog
+        """
+        bc = self._ndi_broadcaster
+        if bc is None or not bc.is_active():
+            return  # ingenting at vise
+        # Åbn preview hvis det ikke allerede er åbent
+        win = self._ndi_preview_window
+        try:
+            if win is None or not win.winfo_exists():
+                from ndi_window import NDIPreviewWindow
+                self._ndi_preview_window = NDIPreviewWindow(self.root, self.model, bc)
+            else:
+                win.lift()
+                win.focus_set()
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror(
+                "Kunne ikke åbne preview", str(e), parent=self.root,
+            )
+
+    def stop_ndi_broadcast(self) -> None:
+        """Stop NDI broadcast (kaldes fra Live-menuen)."""
+        bc = self._ndi_broadcaster
+        if bc is None or not bc.is_active():
+            messagebox.showinfo(
+                "NDI ikke aktiv",
+                "Der er ingen NDI broadcast at stoppe.",
+                parent=self.root,
+            )
+            return
+        bc.stop()
+        # Stop også screen-capture fallback fra v1.5.0 hvis aktiv
+        self._stop_ndi_capture()
+
+    def open_ndi_notes(self) -> None:
+        """Start NDI notes-broadcast + åbn preview-vindue.
+
+        Broadcasten kører via den globale NDIBroadcaster så den fortsætter
+        selvom preview-vinduet lukkes. OBS modtager 'Setlist Manager Notes'.
         """
         try:
             import ndi_output
-            from ndi_window import NDINotesWindow
+            from ndi_broadcaster import MODE_NOTES
+            from ndi_window import NDIPreviewWindow
         except ImportError as e:
             messagebox.showerror(
                 "Fejl",
@@ -2027,21 +2119,47 @@ class SetlistApp:
             )
             return
 
-        # Brug evt. valgt sang som startpunkt
+        bc = self._ensure_ndi_broadcaster()
         sel = self.set_listbox.curselection()
         start_idx = sel[0] if sel else 0
         self.model.autosave()
-        NDINotesWindow(self.root, self.model, start_index=start_idx)
+
+        # Start broadcast hvis ikke allerede aktiv
+        if not bc.is_active():
+            ok = bc.start(
+                mode=MODE_NOTES,
+                ndi_name="Setlist Manager Notes",
+                start_index=start_idx,
+            )
+            if not ok:
+                messagebox.showerror(
+                    "Kunne ikke starte NDI",
+                    bc.get_last_error() or "Ukendt fejl",
+                    parent=self.root,
+                )
+                return
+        else:
+            # Allerede aktiv — opdater bare current_idx
+            bc.set_current_index(start_idx)
+
+        # Åbn (eller fokusér) preview-vinduet
+        win = self._ndi_preview_window
+        if win is None or not win.winfo_exists():
+            self._ndi_preview_window = NDIPreviewWindow(self.root, self.model, bc)
+        else:
+            win.lift()
+            win.focus_set()
 
     def open_stage_mode_ndi(self) -> None:
-        """Åbn Stage Mode i vindue + send vinduet over NDI.
+        """Åbn Stage Mode i vindue + broadcast vinduet over NDI.
 
-        Bruger en simpel screen-capture (ImageGrab) til at fange Stage
-        Mode-vinduet og sende det som NDI video. Lavere kvalitet end
-        'NDI Noter' men viser hele scene-layoutet.
+        Bruger NDIBroadcaster i MODE_STAGE_CAPTURE — det fanger Stage Mode-
+        vinduet med ImageGrab. Når Stage Mode lukkes stopper broadcasten
+        automatisk.
         """
         try:
             import ndi_output
+            from ndi_broadcaster import MODE_STAGE_CAPTURE
         except ImportError as e:
             messagebox.showerror(
                 "Fejl", f"Kunne ikke loade NDI-modulet: {e}",
@@ -2075,7 +2193,7 @@ class SetlistApp:
             )
             return
 
-        # Først: åbn Stage Mode i window-mode (skal være synligt for ImageGrab)
+        # Åbn Stage Mode i window-mode (skal være synligt for ImageGrab)
         sel = self.set_listbox.curselection()
         start_idx = sel[0] if sel else 0
         self.model.autosave()
@@ -2093,44 +2211,32 @@ class SetlistApp:
         )
         self._active_stage_mode = sm
 
-        # Start NDI screen-capture loop
-        try:
-            sender = ndi_output.NDISender(name="Setlist Manager Stage")
-        except ndi_output.NDIError as e:
-            messagebox.showerror("NDI fejl", str(e), parent=self.root)
+        # Start broadcasten via den globale broadcaster
+        bc = self._ensure_ndi_broadcaster()
+        if bc.is_active():
+            bc.stop()  # skift mode rent
+
+        bc.set_stage_window(sm)
+        ok = bc.start(
+            mode=MODE_STAGE_CAPTURE,
+            ndi_name="Setlist Manager Stage",
+            start_index=start_idx,
+        )
+        if not ok:
+            messagebox.showerror(
+                "NDI fejl",
+                bc.get_last_error() or "Kunne ikke starte NDI broadcast.",
+                parent=self.root,
+            )
             return
 
-        self._ndi_capture_sender = sender
-        self._ndi_capture_active = True
-
-        def capture_loop():
-            """Grabber Stage Mode-vinduet og sender hvert ~100ms (10fps)."""
-            if not self._ndi_capture_active:
-                return
-            try:
-                if not sm.winfo_exists():
-                    # Stage Mode lukket — stop capture
-                    self._stop_ndi_capture()
-                    return
-                # Beregn vinduets skærm-koordinater
-                x = sm.winfo_rootx()
-                y = sm.winfo_rooty()
-                w = sm.winfo_width()
-                h = sm.winfo_height()
-                if w > 10 and h > 10:
-                    from PIL import ImageGrab
-                    grabbed = ImageGrab.grab(bbox=(x, y, x + w, y + h))
-                    sender.send_pil_image(grabbed, fps=10.0)
-            except Exception as e:  # noqa: BLE001
-                print(f"[NDI Stage capture] {e}")
-            # Re-schedule
-            if self._ndi_capture_active:
-                self.root.after(100, capture_loop)
-
-        # Også stop capture når Stage Mode lukker
+        # Når Stage Mode lukker → stop broadcast automatisk
         original_close = sm.close
         def patched_close(*args, **kw):
-            self._stop_ndi_capture()
+            try:
+                bc.stop()
+            except Exception:  # noqa: BLE001
+                pass
             return original_close(*args, **kw)
         sm.close = patched_close  # type: ignore[method-assign]
 
@@ -2138,15 +2244,14 @@ class SetlistApp:
             "NDI Stage aktiv",
             "Stage Mode streames nu over NDI som 'Setlist Manager Stage'.\n\n"
             "I OBS: Tilføj kilde → NDI Source → vælg den.\n\n"
-            "Stop ved at lukke Stage Mode-vinduet.",
+            "📡 Indikatoren øverst viser at NDI er LIVE.\n"
+            "Stop ved at lukke Stage Mode eller via Live-menuen.",
             parent=self.root,
         )
 
-        # Start loop'en efter dialogen lukkes
-        self.root.after(200, capture_loop)
-
     def _stop_ndi_capture(self) -> None:
-        """Stop screen-capture NDI loop'en pænt."""
+        """Stop screen-capture NDI loop'en pænt (legacy + ny broadcaster)."""
+        # Legacy: gammel inline capture loop (v1.5.0-v1.5.2)
         self._ndi_capture_active = False
         sender = getattr(self, "_ndi_capture_sender", None)
         if sender is not None:
@@ -2680,6 +2785,18 @@ class SetlistApp:
         self.model.autosave()
 
     def _on_close(self) -> None:
+        # Stop NDI broadcast (hvis aktiv) FØR vi destroy root,
+        # ellers laver after-callbacks TclError mens vinduer dies
+        try:
+            if self._ndi_broadcaster is not None:
+                self._ndi_broadcaster.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        # Også legacy v1.5.0-1.5.2 capture loop
+        try:
+            self._stop_ndi_capture()
+        except Exception:  # noqa: BLE001
+            pass
         self.model.autosave()
         self.root.destroy()
 
