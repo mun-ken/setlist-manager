@@ -1633,6 +1633,19 @@ class SetlistApp:
         )
         m_live.add_separator()
         m_live.add_command(
+            label="📡 Send Stage Mode over NDI (til OBS/vMix)…",
+            command=self.open_stage_mode_ndi,
+        )
+        m_live.add_command(
+            label="🎙 NDI Noter (separat vindue)…",
+            command=self.open_ndi_notes,
+        )
+        m_live.add_command(
+            label="❓ NDI ikke installeret? Klik her",
+            command=self.show_ndi_help,
+        )
+        m_live.add_separator()
+        m_live.add_command(
             label="⌨️  Tilpas hotkeys…",
             command=self.open_hotkeys_dialog,
         )
@@ -1980,6 +1993,190 @@ class SetlistApp:
                     pass
 
         HotkeysDialog(self.root, bindings=current, on_apply=on_apply)
+
+    # ------------------------------------------------------------------
+    #  NDI broadcast (til OBS/vMix/ATEM)
+    # ------------------------------------------------------------------
+    def open_ndi_notes(self) -> None:
+        """Åbn det separate 'NDI Notes' vindue.
+
+        Streamer en pænt formateret notes-frame over NDI med nuværende
+        sang + næste sang. Broadcaster ser det i OBS som en kilde.
+        """
+        try:
+            import ndi_output
+            from ndi_window import NDINotesWindow
+        except ImportError as e:
+            messagebox.showerror(
+                "Fejl",
+                f"Kunne ikke loade NDI-modulet: {e}",
+                parent=self.root,
+            )
+            return
+
+        if not ndi_output.is_available():
+            self.show_ndi_help()
+            return
+
+        songs = self.model.current_setlist.get("songs", [])
+        if not songs:
+            messagebox.showinfo(
+                "Tom setliste",
+                "Tilføj sange til setlisten før du starter NDI Notes.",
+                parent=self.root,
+            )
+            return
+
+        # Brug evt. valgt sang som startpunkt
+        sel = self.set_listbox.curselection()
+        start_idx = sel[0] if sel else 0
+        self.model.autosave()
+        NDINotesWindow(self.root, self.model, start_index=start_idx)
+
+    def open_stage_mode_ndi(self) -> None:
+        """Åbn Stage Mode i vindue + send vinduet over NDI.
+
+        Bruger en simpel screen-capture (ImageGrab) til at fange Stage
+        Mode-vinduet og sende det som NDI video. Lavere kvalitet end
+        'NDI Noter' men viser hele scene-layoutet.
+        """
+        try:
+            import ndi_output
+        except ImportError as e:
+            messagebox.showerror(
+                "Fejl", f"Kunne ikke loade NDI-modulet: {e}",
+                parent=self.root,
+            )
+            return
+
+        if not ndi_output.is_available():
+            self.show_ndi_help()
+            return
+
+        # Tjek for Pillow ImageGrab
+        try:
+            from PIL import ImageGrab  # type: ignore[import-not-found]
+            _ = ImageGrab  # marker som brugt
+        except ImportError:
+            messagebox.showerror(
+                "Pillow mangler",
+                "PIL.ImageGrab er ikke tilgængelig — kan ikke fange "
+                "skærmindholdet til NDI.",
+                parent=self.root,
+            )
+            return
+
+        songs = self.model.current_setlist.get("songs", [])
+        if not songs:
+            messagebox.showinfo(
+                "Tom setliste",
+                "Tilføj sange til setlisten først.",
+                parent=self.root,
+            )
+            return
+
+        # Først: åbn Stage Mode i window-mode (skal være synligt for ImageGrab)
+        sel = self.set_listbox.curselection()
+        start_idx = sel[0] if sel else 0
+        self.model.autosave()
+
+        try:
+            from hotkeys import KeyBindings
+            bindings = KeyBindings.load()
+        except Exception:  # noqa: BLE001
+            bindings = None
+
+        sm = StageMode(
+            self.root, self.model,
+            start_index=start_idx, mode="window",
+            key_bindings=bindings,
+        )
+        self._active_stage_mode = sm
+
+        # Start NDI screen-capture loop
+        try:
+            sender = ndi_output.NDISender(name="Setlist Manager Stage")
+        except ndi_output.NDIError as e:
+            messagebox.showerror("NDI fejl", str(e), parent=self.root)
+            return
+
+        self._ndi_capture_sender = sender
+        self._ndi_capture_active = True
+
+        def capture_loop():
+            """Grabber Stage Mode-vinduet og sender hvert ~100ms (10fps)."""
+            if not self._ndi_capture_active:
+                return
+            try:
+                if not sm.winfo_exists():
+                    # Stage Mode lukket — stop capture
+                    self._stop_ndi_capture()
+                    return
+                # Beregn vinduets skærm-koordinater
+                x = sm.winfo_rootx()
+                y = sm.winfo_rooty()
+                w = sm.winfo_width()
+                h = sm.winfo_height()
+                if w > 10 and h > 10:
+                    from PIL import ImageGrab
+                    grabbed = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+                    sender.send_pil_image(grabbed, fps=10.0)
+            except Exception as e:  # noqa: BLE001
+                print(f"[NDI Stage capture] {e}")
+            # Re-schedule
+            if self._ndi_capture_active:
+                self.root.after(100, capture_loop)
+
+        # Også stop capture når Stage Mode lukker
+        original_close = sm.close
+        def patched_close(*args, **kw):
+            self._stop_ndi_capture()
+            return original_close(*args, **kw)
+        sm.close = patched_close  # type: ignore[method-assign]
+
+        messagebox.showinfo(
+            "NDI Stage aktiv",
+            "Stage Mode streames nu over NDI som 'Setlist Manager Stage'.\n\n"
+            "I OBS: Tilføj kilde → NDI Source → vælg den.\n\n"
+            "Stop ved at lukke Stage Mode-vinduet.",
+            parent=self.root,
+        )
+
+        # Start loop'en efter dialogen lukkes
+        self.root.after(200, capture_loop)
+
+    def _stop_ndi_capture(self) -> None:
+        """Stop screen-capture NDI loop'en pænt."""
+        self._ndi_capture_active = False
+        sender = getattr(self, "_ndi_capture_sender", None)
+        if sender is not None:
+            try:
+                sender.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._ndi_capture_sender = None
+
+    def show_ndi_help(self) -> None:
+        """Vis dialog med info om hvad NDI er + hvordan man installerer."""
+        try:
+            import ndi_output
+        except ImportError as e:
+            help_text = (
+                f"NDI-modulet kunne ikke loades: {e}\n\n"
+                f"Sandsynligvis mangler 'ndi-python' Python-pakken."
+            )
+        else:
+            help_text = ndi_output.get_install_help()
+            if ndi_output.is_available():
+                help_text = (
+                    "✅ NDI er klar til brug!\n\n" +
+                    "Du kan bruge:\n"
+                    "  • 'NDI Noter' — render pænt notes-billede\n"
+                    "  • 'Send Stage Mode over NDI' — grab live-vinduet\n\n"
+                    "I OBS/vMix: Tilføj 'NDI Source' og vælg navnet."
+                )
+
+        messagebox.showinfo("NDI — broadcast til OBS/vMix", help_text, parent=self.root)
 
     def _focus_search(self) -> None:
         self.lib_search_entry.focus_set()

@@ -41,13 +41,23 @@ try:
 except ImportError:
     pass
 
+# NDI binding — hvis installeret, sørg for PyInstaller bundler den.
+# Hvis ikke: ingen problem, NDI-features bliver gråtonet i UI'et.
+hidden_imports = ["certifi"]
+try:
+    import NDIlib  # noqa: F401
+    hidden_imports.append("NDIlib")
+except (ImportError, OSError):
+    # NDI Runtime ikke installeret på build-maskinen — fortsæt uden NDI
+    pass
+
 
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=["certifi"],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

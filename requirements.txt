@@ -7,3 +7,11 @@ Pillow>=10.0
 # så ssl.create_default_context() fejler med CERTIFICATE_VERIFY_FAILED.
 # certifi giver os en pålidelig CA-bundle som fallback.
 certifi>=2024.0.0
+
+# NDI broadcast (til OBS/vMix/ATEM):
+# numpy + ndi-python. Begge er optional — appen kører fint uden dem.
+# Hvis ndi-python ikke kan installeres (kræver NDI Runtime fra
+# https://ndi.video/tools/), springer requirements.txt det over og
+# NDI-features bliver gråtonet i UI'et.
+numpy>=1.24
+ndi-python>=5.1.1.5; platform_system == "Windows" or platform_system == "Darwin"

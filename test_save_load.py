@@ -2564,6 +2564,187 @@ def test_hotkeys_stage_mode_rebind_changes_live() -> None:
 
 
 # ===========================================================================
+#  NDI tests
+# ===========================================================================
+def test_ndi_output_module_loads() -> None:
+    """ndi_output skal kunne importeres uden at crashe — også når NDI Runtime
+    ikke er installeret. is_available() skal bare returnere False."""
+    import ndi_output
+    assert hasattr(ndi_output, "is_available")
+    assert hasattr(ndi_output, "NDISender")
+    assert hasattr(ndi_output, "NDIError")
+    # Bør være en bool uanset om NDI er der eller ej
+    result = ndi_output.is_available()
+    assert isinstance(result, bool)
+    print(f"  ndi_output loads OK (NDI tilgængelig: {result})")
+
+
+def test_ndi_output_install_help_is_useful() -> None:
+    """get_install_help skal returnere noget brugbart selv når NDI ikke er der."""
+    import ndi_output
+    help_text = ndi_output.get_install_help()
+    assert isinstance(help_text, str)
+    assert len(help_text) > 20  # ikke bare tom streng
+    if not ndi_output.is_available():
+        # Skal nævne download-URL'en
+        assert "ndi.video" in help_text.lower(), "Hjælp skal nævne ndi.video"
+    print("  ndi_output install_help is useful OK")
+
+
+def test_ndi_output_sender_raises_clear_error_when_unavailable() -> None:
+    """Forsøg på at lave NDISender uden NDI installeret skal give en
+    pæn NDIError — IKKE en mystisk AttributeError eller importfejl."""
+    import ndi_output
+    if ndi_output.is_available():
+        print("  ndi_sender error raise (skipped — NDI er installeret)")
+        return
+    try:
+        ndi_output.NDISender(name="Test")
+        assert False, "Skulle have rejst NDIError"
+    except ndi_output.NDIError as e:
+        # Fejlbeskeden skal være hjælpsom (indeholde download-link)
+        assert "ndi.video" in str(e).lower() or len(str(e)) > 20
+        print("  ndi_sender raises clear NDIError when unavailable OK")
+
+
+def test_ndi_renderer_module_loads() -> None:
+    """ndi_renderer skal kunne importeres."""
+    import ndi_renderer
+    assert hasattr(ndi_renderer, "render_notes_frame")
+    assert hasattr(ndi_renderer, "get_current_and_next")
+    print("  ndi_renderer loads OK")
+
+
+def test_ndi_renderer_render_basic_frame() -> None:
+    """render_notes_frame skal lave et gyldigt PIL-billede med rigtige dimensioner."""
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        print("  ndi_renderer render (skipped — Pillow mangler)")
+        return
+
+    from ndi_renderer import render_notes_frame
+    img = render_notes_frame(
+        current_song={"name": "Test Sang", "key": "C", "duration": "3:30",
+                      "notes": "Husk at smile"},
+        next_song={"name": "Næste Sang", "key": "G", "duration": "4:00", "notes": ""},
+        setlist_name="MIN SETLIST",
+        song_position="Sang 5 af 12",
+        width=640, height=360,
+    )
+    assert img is not None, "render_notes_frame returnerede None"
+    assert img.size == (640, 360)
+    # Det skal være RGBA (vi sender det videre til NDI som BGRA)
+    assert img.mode == "RGBA"
+    print("  ndi_renderer renders basic frame OK")
+
+
+def test_ndi_renderer_handles_no_current_song() -> None:
+    """Skal kunne håndtere current_song=None uden at crashe."""
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        print("  ndi_renderer no current (skipped — Pillow mangler)")
+        return
+    from ndi_renderer import render_notes_frame
+    img = render_notes_frame(
+        current_song=None, next_song=None,
+        width=320, height=180,
+    )
+    assert img is not None
+    assert img.size == (320, 180)
+    print("  ndi_renderer handles None songs OK")
+
+
+def test_ndi_renderer_handles_long_notes_with_wrap() -> None:
+    """Lange noter skal wrappes — ikke spilde over rammen."""
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        print("  ndi_renderer long notes (skipped — Pillow mangler)")
+        return
+    from ndi_renderer import render_notes_frame
+    long_notes = " ".join(["meget lang note der skal wrappes"] * 30)
+    img = render_notes_frame(
+        current_song={"name": "Long", "notes": long_notes},
+        next_song=None,
+        width=800, height=450,
+    )
+    assert img is not None
+    assert img.size == (800, 450)
+    print("  ndi_renderer wraps long notes OK")
+
+
+def test_ndi_renderer_get_current_and_next_skips_markers() -> None:
+    """get_current_and_next skal springe markører over."""
+    from ndi_renderer import get_current_and_next
+    from setlist_model import SetlistModel, make_marker
+
+    model = SetlistModel()
+    model.add_song("Sang A")
+    model.add_song("Sang B")
+    model.add_song("Sang C")
+    # Setliste: A, MARKER, B, C
+    model.current_setlist["songs"] = ["Sang A", make_marker("PAUSE"), "Sang B", "Sang C"]
+
+    # Start på A (index 0): next skal være B (skip marker)
+    cur, nxt = get_current_and_next(model, 0)
+    assert cur is not None and cur["name"] == "Sang A"
+    assert nxt is not None and nxt["name"] == "Sang B"
+
+    # Hvis vi peger på marker (index 1) skal current spring til B
+    cur, nxt = get_current_and_next(model, 1)
+    assert cur is not None and cur["name"] == "Sang B"
+    assert nxt is not None and nxt["name"] == "Sang C"
+
+    # På sidste sang skal next være None
+    cur, nxt = get_current_and_next(model, 3)
+    assert cur is not None and cur["name"] == "Sang C"
+    assert nxt is None
+    print("  ndi_renderer get_current_and_next skips markers OK")
+
+
+def test_ndi_window_does_not_crash_when_ndi_unavailable() -> None:
+    """Hvis NDI ikke er installeret skal NDINotesWindow lukke pænt med en
+    fejlbesked — ikke crashe hovedappen."""
+    if not _TK_OK:
+        print("  ndi_window unavailable (skipped — Tk not available)")
+        return
+
+    import ndi_output
+    if ndi_output.is_available():
+        print("  ndi_window unavailable (skipped — NDI er faktisk installeret)")
+        return
+
+    import tkinter as tk
+    from unittest.mock import patch
+    from ndi_window import NDINotesWindow
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        model = SetlistModel()
+        model.add_song("Test")
+        model.current_setlist["songs"] = ["Test"]
+
+        # Patch messagebox så testen ikke poppper en dialog op
+        with patch("ndi_window.messagebox.showerror") as mock_err:
+            win = NDINotesWindow(root, model)
+            # Vinduet skal have planlagt sin egen destruction
+            assert mock_err.called, "Skulle have vist 'NDI ikke tilgængelig'"
+            # Lad after(10, destroy) køre
+            root.update()
+            root.update_idletasks()
+        print("  ndi_window handles missing NDI gracefully OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+# ===========================================================================
 def run_all() -> None:
     tests = [
         test_basic_save_load_roundtrip,
@@ -2683,6 +2864,15 @@ def run_all() -> None:
         test_hotkeys_set_keys_dedupes,
         test_hotkeys_stage_mode_uses_custom_bindings,
         test_hotkeys_stage_mode_rebind_changes_live,
+        test_ndi_output_module_loads,
+        test_ndi_output_install_help_is_useful,
+        test_ndi_output_sender_raises_clear_error_when_unavailable,
+        test_ndi_renderer_module_loads,
+        test_ndi_renderer_render_basic_frame,
+        test_ndi_renderer_handles_no_current_song,
+        test_ndi_renderer_handles_long_notes_with_wrap,
+        test_ndi_renderer_get_current_and_next_skips_markers,
+        test_ndi_window_does_not_crash_when_ndi_unavailable,
     ]
     print(f"Running {len(tests)} tests...")
     for t in tests:
