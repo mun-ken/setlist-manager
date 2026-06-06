@@ -2894,7 +2894,7 @@ def test_ndi_broadcaster_set_current_index_skips_markers() -> None:
         model.add_song("Sang C")
         model.current_setlist["songs"] = [
             "Sang A",
-            {"_marker": True, "text": "Ekstra"},
+            {"marker": "Ekstra"},
             "Sang B",
             "Sang C",
         ]
