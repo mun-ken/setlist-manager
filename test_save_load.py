@@ -2099,13 +2099,22 @@ def test_stage_mode_font_scales_with_window_size() -> None:
             font = sm._font("current_main")
             assert font[1] == base // 2, f"At half: expected {base//2}, got {font[1]}"
 
-            # Min-grænse: meget lille vindue
-            sm.winfo_height = fake_height(50)  # type: ignore[method-assign]
-            assert sm._scale() == stage_mode.StageMode.MIN_SCALE
+            # Min-grænse: meget lille vindue. NB: _scale() har et guard
+            # 'if h < 100: return 1.0' (for at undgå crash på ikke-initialiseret
+            # vindue), så vi bruger h=200 der giver naturligt 0.20 → capped til
+            # MIN_SCALE (0.35).
+            sm.winfo_height = fake_height(200)  # type: ignore[method-assign]
+            assert sm._scale() == stage_mode.StageMode.MIN_SCALE, \
+                f"Expected MIN_SCALE ({stage_mode.StageMode.MIN_SCALE}), got {sm._scale()}"
             font = sm._font("current_main")
             min_expected = int(base * stage_mode.StageMode.MIN_SCALE)
             assert font[1] == min_expected, \
                 f"At min-grænse: expected {min_expected}, got {font[1]}"
+
+            # Uninitialiseret vindue (h < 100) → returnerer 1.0 som fallback
+            sm.winfo_height = fake_height(0)  # type: ignore[method-assign]
+            assert sm._scale() == 1.0, \
+                "Ved h<100 (vindue ikke ready) skal _scale returnere 1.0 som safe default"
 
             # Max-grænse: kæmpe vindue
             sm.winfo_height = fake_height(10000)  # type: ignore[method-assign]
