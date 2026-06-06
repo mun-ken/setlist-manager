@@ -37,6 +37,8 @@ from setlist_model import (
     item_song_name,
     new_song,
 )
+from stage_mode import StageMode
+import theme
 
 import updater
 from version import APP_VERSION
@@ -95,6 +97,7 @@ class SongDialog(tk.Toplevel):
 
         ttk.Label(frm, text="Noter:").grid(row=len(rows), column=0, sticky=tk.NW, pady=4)
         self._notes = tk.Text(frm, width=36, height=4, wrap=tk.WORD)
+        theme.style_text(self._notes)
         self._notes.insert("1.0", initial.get("notes", ""))
         self._notes.grid(row=len(rows), column=1, sticky=tk.W + tk.E, pady=4, padx=(8, 0))
 
@@ -1606,6 +1609,15 @@ class SetlistApp:
         m_band.add_command(label="🔍 Søg sange i alle bands…", command=self.open_search_all_bands)
         menubar.add_cascade(label="Bands", menu=m_band)
 
+        # NYT: Live-menu for performance-features
+        m_live = tk.Menu(menubar, tearoff=0)
+        m_live.add_command(
+            label="🎬 Start Stage Mode (fuldskærm)",
+            accelerator="F5",
+            command=self.open_stage_mode,
+        )
+        menubar.add_cascade(label="Live", menu=m_live)
+
         m_help = tk.Menu(menubar, tearoff=0)
         m_help.add_command(
             label="🔄 Søg efter opdateringer…",
@@ -1620,6 +1632,7 @@ class SetlistApp:
         self.root.bind("<Control-o>", lambda e: self.load_from())
         self.root.bind("<Control-p>", lambda e: self.export_print())
         self.root.bind("<Control-f>", lambda e: self._focus_search())
+        self.root.bind("<F5>", lambda e: self.open_stage_mode())
 
     def _build_top_bar(self) -> None:
         wrap = ttk.Frame(self.root, padding=(8, 6, 8, 2))
@@ -1662,8 +1675,17 @@ class SetlistApp:
         ttk.Button(row2, text="Omdøb", command=self.rename_setlist).pack(side=tk.LEFT, padx=2)
         ttk.Button(row2, text="Slet", command=self.delete_setlist).pack(side=tk.LEFT, padx=2)
 
+        # Stage Mode-knap til højre — accent-styled så den er let at se
+        ttk.Button(
+            row2, text="🎬  Stage Mode",
+            style="Accent.TButton",
+            command=self.open_stage_mode,
+        ).pack(side=tk.RIGHT)
+
         self.status_var = tk.StringVar(value="")
-        ttk.Label(row2, textvariable=self.status_var, foreground="#555").pack(side=tk.RIGHT)
+        ttk.Label(
+            row2, textvariable=self.status_var, style="Secondary.TLabel",
+        ).pack(side=tk.RIGHT, padx=(0, 12))
 
     def _build_main_area(self) -> None:
         main = ttk.Frame(self.root, padding=8)
@@ -1729,7 +1751,8 @@ class SetlistApp:
         )
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0))
 
-        self.set_listbox = tk.Listbox(right, selectmode=tk.SINGLE, activestyle="dotbox")
+        self.set_listbox = tk.Listbox(right, selectmode=tk.SINGLE, activestyle="none")
+        theme.style_listbox(self.set_listbox)
         self.set_listbox.pack(fill=tk.BOTH, expand=True)
         self.set_listbox.bind("<Button-1>", self._dnd_press)
         self.set_listbox.bind("<B1-Motion>", self._dnd_motion)
@@ -1850,6 +1873,28 @@ class SetlistApp:
 
     def open_logo_dialog(self) -> None:
         LogoDialog(self.root, self)
+
+    def open_stage_mode(self) -> None:
+        """Åbn fuldskærms Stage Mode til live performance.
+
+        Hvis den aktive setliste er tom, vis en venlig besked i stedet.
+        Hvis brugeren har valgt en sang i setlisten, start dér — ellers
+        start fra første sang.
+        """
+        songs = self.model.current_setlist.get("songs", [])
+        if not songs:
+            messagebox.showinfo(
+                "Tom setliste",
+                "Tilføj nogle sange til setlisten før du starter Stage Mode.",
+                parent=self.root,
+            )
+            return
+        # Brug evt. valgt sang som startpunkt
+        sel = self.set_listbox.curselection()
+        start_idx = sel[0] if sel else 0
+        # Gem inden vi går i scenelyset (for en sikkerheds skyld)
+        self.model.autosave()
+        StageMode(self.root, self.model, start_index=start_idx)
 
     def _focus_search(self) -> None:
         self.lib_search_entry.focus_set()
@@ -2207,7 +2252,7 @@ class SetlistApp:
         for item in self.lib_tree.get_children():
             self.lib_tree.delete(item)
         # Konfigurer tag for sange der allerede er i setlisten — vis dem grå
-        self.lib_tree.tag_configure("in_setlist", foreground="#9a9a9a")
+        self.lib_tree.tag_configure("in_setlist", foreground=theme.Colors.IN_SETLIST_FG)
         # NB: setlisten kan indeholde både sang-strenge OG markør-dicts
         # ({"marker": "EKSTRA"}). Dicts er ikke hashable, så vi MÅ ikke
         # putte hele listen ind i en set() — vi tager kun sang-navnene.
@@ -2254,8 +2299,11 @@ class SetlistApp:
                 label = item_marker_label(item)
                 self.set_listbox.insert(tk.END, f"   ─── {label} ───")
                 self.set_listbox.itemconfig(
-                    idx, foreground="#6b4f00", background="#fff7d6",
-                    selectforeground="#fff", selectbackground="#b88a00",
+                    idx,
+                    foreground=theme.Colors.MARKER_FG,
+                    background=theme.Colors.MARKER_BG,
+                    selectforeground=theme.Colors.MARKER_SELECTED_FG,
+                    selectbackground=theme.Colors.MARKER_SELECTED_BG,
                 )
             else:
                 # Almindelig sang — vis nummer, navn, toneart/længde
@@ -2394,6 +2442,7 @@ class SetlistApp:
             " • Importer fra MusicBrainz (internet)\n"
             " • Logo pr. band på printet\n"
             " • Live forhåndsvisning af A4-print\n"
+            " • 🎬 Stage Mode — fuldskærm til koncerten (F5)\n"
             " • Auto-opdatering — tjekker GitHub for nye versioner\n"
             " • Auto-gem så du aldrig mister noget",
             parent=self.root,
@@ -2475,10 +2524,9 @@ class SetlistApp:
 
 def main() -> int:
     root = tk.Tk()
+    # Anvend det moderne tema FØR vi bygger nogen widgets
     try:
-        style = ttk.Style()
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
+        theme.apply_theme(root)
     except tk.TclError:
         pass
 

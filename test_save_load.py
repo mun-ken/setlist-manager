@@ -1721,6 +1721,266 @@ def test_version_module_has_required_fields() -> None:
     print("  version.py has all required fields OK")
 
 
+# ---------------------------------------------------------------------------
+# Theme + Stage Mode tests
+# ---------------------------------------------------------------------------
+def _tk_available() -> bool:
+    """True hvis vi kan instantiere et Tk-vindue på denne maskine.
+
+    På macOS med /usr/bin/python3 kan tk være broken (kræver nyere macOS-version).
+    På CI uden display vil Tk() også fejle. I begge tilfælde springer vi
+    GUI-tests over så test-suite kører grønt."""
+    try:
+        import tkinter as tk
+        r = tk.Tk()
+        r.destroy()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_TK_OK = _tk_available()
+
+
+def _tkinter_importable() -> bool:
+    """True hvis tkinter overhovedet kan importeres (Python built with Tk)."""
+    try:
+        import tkinter  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+_TKINTER_OK = _tkinter_importable()
+
+
+def test_theme_module_loads() -> None:
+    """theme.py kan importeres og har de forventede klasser/funktioner."""
+    if not _TKINTER_OK:
+        print("  theme module loads (skipped — Python uden tkinter)")
+        return
+    import theme
+    # Klasser
+    assert hasattr(theme, "Colors")
+    assert hasattr(theme, "Fonts")
+    # Funktioner
+    assert callable(theme.apply_theme)
+    assert callable(theme.style_listbox)
+    assert callable(theme.style_text)
+    # Vigtige farver der bruges af main.py
+    for color_name in (
+        "BG", "SURFACE", "TEXT", "ACCENT", "BORDER",
+        "MARKER_BG", "MARKER_FG", "MARKER_SELECTED_BG", "MARKER_SELECTED_FG",
+        "IN_SETLIST_FG", "SELECTED_BG",
+    ):
+        c = getattr(theme.Colors, color_name)
+        assert isinstance(c, str) and c.startswith("#"), \
+            f"theme.Colors.{color_name} skal være en hex-farve, fik {c!r}"
+    print("  theme module loads OK")
+
+
+def test_theme_apply_does_not_crash() -> None:
+    """apply_theme på en headless Tk skal ikke crashe."""
+    if not _TK_OK:
+        print("  theme apply (skipped — Tk not available)")
+        return
+    import tkinter as tk
+    import theme
+    root = tk.Tk()
+    try:
+        theme.apply_theme(root)
+        # Verificér at clam-temaet er aktivt
+        from tkinter import ttk
+        style = ttk.Style(root)
+        assert style.theme_use() == "clam"
+        print("  theme.apply_theme OK")
+    finally:
+        root.destroy()
+
+
+def test_stage_mode_module_loads() -> None:
+    """stage_mode.py kan importeres og har StageMode-klassen."""
+    if not _TKINTER_OK:
+        print("  stage_mode module loads (skipped — Python uden tkinter)")
+        return
+    import stage_mode
+    assert hasattr(stage_mode, "StageMode")
+    assert hasattr(stage_mode, "StageColors")
+    # StageMode er en Toplevel-subclass — men import af tkinter kan
+    # crashe på broken macOS, så vi skipper denne check hvis det er tilfældet
+    if _TK_OK:
+        import tkinter as tk
+        assert issubclass(stage_mode.StageMode, tk.Toplevel)
+    print("  stage_mode module loads OK")
+
+
+def test_stage_mode_navigation_skips_markers() -> None:
+    """Stage Mode skal hoppe over markører ved Next/Prev sang."""
+    if not _TK_OK:
+        print("  stage_mode navigation (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from setlist_model import SetlistModel, make_marker
+
+    root = tk.Tk()
+    root.withdraw()  # usynlig
+
+    try:
+        # Opbyg en model med: sang1, MARKER, sang2, sang3, MARKER, sang4
+        model = SetlistModel()
+        for n in ("A", "B", "C", "D"):
+            model.add_song(n)
+        sl = model.current_setlist
+        sl["songs"] = ["A", make_marker("PAUSE"), "B", "C",
+                       make_marker("EKSTRA"), "D"]
+
+        # Patch fullscreen så vi ikke maxer vinduet under test
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                return False  # ignorer fullscreen-kald
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            sm = stage_mode.StageMode(root, model, start_index=0)
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+
+        try:
+            # Start: index 0 (sang A)
+            assert sm.current_idx == 0
+            # Next → skip marker @1 → index 2 (sang B)
+            sm.next_song()
+            assert sm.current_idx == 2, f"expected 2, got {sm.current_idx}"
+            # Next → index 3 (sang C)
+            sm.next_song()
+            assert sm.current_idx == 3
+            # Next → skip marker @4 → index 5 (sang D)
+            sm.next_song()
+            assert sm.current_idx == 5
+            # Next ved sidste sang → ingen ændring
+            sm.next_song()
+            assert sm.current_idx == 5
+            # Prev → skip marker @4 → index 3 (sang C)
+            sm.prev_song()
+            assert sm.current_idx == 3
+            # Prev → index 2 (sang B)
+            sm.prev_song()
+            assert sm.current_idx == 2
+            # Prev → skip marker @1 → index 0 (sang A)
+            sm.prev_song()
+            assert sm.current_idx == 0
+            # Prev ved første sang → ingen ændring
+            sm.prev_song()
+            assert sm.current_idx == 0
+        finally:
+            sm.close()
+        print("  stage_mode navigation skips markers OK")
+    finally:
+        root.destroy()
+
+
+def test_stage_mode_start_index_on_marker_skips_forward() -> None:
+    """Hvis start_index peger på en markør, skal Stage Mode hoppe frem
+    til første rigtige sang."""
+    if not _TK_OK:
+        print("  stage_mode start-on-marker (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from setlist_model import SetlistModel, make_marker
+
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        model = SetlistModel()
+        for n in ("X", "Y"):
+            model.add_song(n)
+        sl = model.current_setlist
+        # [MARKER, X, Y] — start_index=0 peger på markør
+        sl["songs"] = [make_marker("INTRO"), "X", "Y"]
+
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                return False
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            sm = stage_mode.StageMode(root, model, start_index=0)
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+
+        try:
+            # Skal være hoppet frem til index 1 (sang X)
+            assert sm.current_idx == 1
+        finally:
+            sm.close()
+        print("  stage_mode start-on-marker skips forward OK")
+    finally:
+        root.destroy()
+
+
+def test_stage_mode_go_to_song_number() -> None:
+    """go_to_song_number(N) skal hoppe til sang nummer N (1-baseret,
+    markører tæller ikke)."""
+    if not _TK_OK:
+        print("  stage_mode go_to_song_number (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from setlist_model import SetlistModel, make_marker
+
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        model = SetlistModel()
+        for n in ("A", "B", "C", "D"):
+            model.add_song(n)
+        sl = model.current_setlist
+        # [A, MARKER, B, C, MARKER, D] → song 1=A, 2=B, 3=C, 4=D
+        sl["songs"] = ["A", make_marker("M1"), "B", "C", make_marker("M2"), "D"]
+
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                return False
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            sm = stage_mode.StageMode(root, model, start_index=0)
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+
+        try:
+            # Sang 4 = D = index 5
+            sm.go_to_song_number(4)
+            assert sm.current_idx == 5
+            # Sang 2 = B = index 2
+            sm.go_to_song_number(2)
+            assert sm.current_idx == 2
+            # Sang 1 = A = index 0
+            sm.go_to_song_number(1)
+            assert sm.current_idx == 0
+            # Sang 99 = no-op (uden ændring)
+            sm.go_to_song_number(99)
+            assert sm.current_idx == 0
+        finally:
+            sm.close()
+        print("  stage_mode go_to_song_number OK")
+    finally:
+        root.destroy()
+
+
 # ===========================================================================
 def run_all() -> None:
     tests = [
@@ -1819,6 +2079,12 @@ def run_all() -> None:
         test_updater_launch_installer_calls_correct_command_on_unix,
         test_updater_launch_installer_silent_uses_inno_flags,
         test_version_module_has_required_fields,
+        test_theme_module_loads,
+        test_theme_apply_does_not_crash,
+        test_stage_mode_module_loads,
+        test_stage_mode_navigation_skips_markers,
+        test_stage_mode_start_index_on_marker_skips_forward,
+        test_stage_mode_go_to_song_number,
     ]
     print(f"Running {len(tests)} tests...")
     for t in tests:
