@@ -149,6 +149,9 @@ class StageMode(tk.Toplevel):
 
         # Hold reference til alle widget-rows så vi kan opdatere/scrolle
         self.song_widgets: List[tk.Frame] = []
+        # Spacers omkring listen — bygges/rebuildes i _refresh()
+        self.top_spacer: tk.Frame | None = None
+        self.bottom_spacer: tk.Frame | None = None
 
         # Cursor-hiding state
         self._cursor_hidden = False
@@ -373,10 +376,20 @@ class StageMode(tk.Toplevel):
     # ------------------------------------------------------------------
     def _refresh(self) -> None:
         """Genoptegn HELE listen — current-song fremhævet, top-bar opdateret."""
-        # Slet eksisterende
+        # Slet eksisterende rækker
         for w in self.song_widgets:
             w.destroy()
         self.song_widgets = []
+        # Slet også top/bottom spacers (de er IKKE i song_widgets, så vi
+        # skal selv rydde op manuelt)
+        for attr in ("top_spacer", "bottom_spacer"):
+            old = getattr(self, attr, None)
+            if old is not None:
+                try:
+                    old.destroy()
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
 
         # Husk den skala vi byggede med — så _maybe_rebuild_after_resize
         # kan se om der er ændret nok til at retfærdiggøre genbygning
@@ -391,6 +404,17 @@ class StageMode(tk.Toplevel):
             pass
 
         song_num = 0
+        # Top-spacer SÅ FØRSTE RÆKKES TEKST ALDRIG STARTER VED Y=0
+        # (gigantiske fonts på current-row kan ellers blive klippet i toppen
+        # når scroll-positionen rammer toppen af canvas).
+        # NB: må IKKE føjes til self.song_widgets — den liste skal være
+        # parallel med self.items så self.current_idx → rigtigt widget.
+        self.top_spacer = tk.Frame(
+            self.inner, bg=StageColors.BG,
+            height=self._padding(40),
+        )
+        self.top_spacer.pack(fill=tk.X)
+
         for i, item in enumerate(self.items):
             if is_marker_item(item):
                 w = self._make_marker_row(item_marker_label(item))
@@ -401,9 +425,10 @@ class StageMode(tk.Toplevel):
             self.song_widgets.append(w)
 
         # Lidt luft i bunden så sidste sang ikke klistrer
-        spacer = tk.Frame(self.inner, bg=StageColors.BG, height=self._padding(300))
-        spacer.pack(fill=tk.X)
-        self.song_widgets.append(spacer)
+        self.bottom_spacer = tk.Frame(
+            self.inner, bg=StageColors.BG, height=self._padding(300),
+        )
+        self.bottom_spacer.pack(fill=tk.X)
 
         # Top bar
         sl_name = self.model.current_setlist.get("name", "Setliste")
@@ -418,8 +443,12 @@ class StageMode(tk.Toplevel):
         # Notes
         self._update_notes()
 
-        # Scroll så current er omkring 1/3 fra toppen
+        # Scroll så current er omkring 1/3 fra toppen.
+        # Vi kalder TO gange: én efter idle (umiddelbart) og én efter 80ms
+        # som backup — Tkinter rapporterer nogen gange forkerte winfo_y/
+        # winfo_height for nybyggede widgets i første idle-cyklus.
         self.after_idle(self._scroll_to_current)
+        self.after(80, self._scroll_to_current)
 
     def _make_song_row(self, name: str, idx: int, song_num: int) -> tk.Frame:
         is_current = (idx == self.current_idx)
@@ -528,7 +557,16 @@ class StageMode(tk.Toplevel):
     #  Scroll så current song er omkring 1/3 fra toppen
     # ------------------------------------------------------------------
     def _scroll_to_current(self) -> None:
+        """Scroll så current-row er ca. 1/3 fra toppen — men ALDRIG sådan
+        at toppen eller bunden af current-row bliver klippet.
+
+        Garanterer at hele current-row's tekst altid er fuldt synlig — også
+        i små vinduer hvor scroll-margin er begrænset.
+        """
         try:
+            # Force fuld geometri-beregning så winfo_y / winfo_height er
+            # nøjagtige (update_idletasks alene er nogen gange ikke nok
+            # når widgets lige er blevet bygget om)
             self.update_idletasks()
         except tk.TclError:
             return
@@ -542,13 +580,34 @@ class StageMode(tk.Toplevel):
             inner_h = self.inner.winfo_height()
             canvas_h = self.canvas.winfo_height()
             if inner_h <= canvas_h or canvas_h <= 0:
+                # Alt passer i viewport — bare scroll til toppen
+                self.canvas.yview_moveto(0.0)
                 return
+
             w_y = w.winfo_y()
-            # Target: placér current 1/3 fra toppen for at vise nogle
-            # næste-sange under den
-            target_y = max(0, w_y - canvas_h // 3)
+            w_h = max(1, w.winfo_height())
+
+            # Safety-margin: hold mindst 12px (skaleret) luft over og under
+            # current-row så fonts med stor ascent/descent ikke klippes
+            margin = max(8, int(12 * self._scale()))
+
+            # Foretrukken position: current-row's top ca. 1/3 fra toppen
+            preferred_top = w_y - canvas_h // 3
+
+            # Hård regel 1: viewport-top må aldrig være > (w_y - margin)
+            # → ellers klippes toppen af current
+            max_allowed_top = w_y - margin
+            # Hård regel 2: viewport-bottom må aldrig være < (w_y + w_h + margin)
+            # → ellers klippes bunden af current
+            min_allowed_top = w_y + w_h + margin - canvas_h
+
+            # Klem preferred ind imellem reglerne
+            target_y = max(min_allowed_top, min(preferred_top, max_allowed_top))
+            # Holdes også indenfor scrollregion
             max_y = max(1, inner_h - canvas_h)
-            fraction = min(1.0, target_y / max_y)
+            target_y = max(0, min(target_y, max_y))
+
+            fraction = target_y / max_y
             self.canvas.yview_moveto(fraction)
         except (tk.TclError, ZeroDivisionError):
             pass
