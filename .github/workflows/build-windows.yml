@@ -50,6 +50,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Verify NDI is properly bundled
+        shell: pwsh
+        run: |
+          # NDI er en kritisk feature i v1.5+ — vi vil VIDE at det er
+          # installeret før vi bygger, ellers får brugere "NDI ikke
+          # tilgængeligt"-besked selvom de bare har downloadet vores
+          # installer.
+          python -c "import NDIlib; print('NDIlib OK:', NDIlib.__file__)"
+          python -c "import numpy; print('numpy OK:', numpy.__version__)"
+
       - name: Run unit tests
         run: python test_save_load.py
 
@@ -78,6 +88,22 @@ jobs:
 
       - name: Build standalone EXE with PyInstaller
         run: pyinstaller setlist.spec --noconfirm
+
+      - name: Verify NDI DLL is bundled in dist
+        shell: pwsh
+        run: |
+          # Find Processing.NDI.Lib.x64.dll i dist-mappen.
+          # Hvis den IKKE findes vil end-user få 'NDI Runtime ikke fundet'
+          # selvom de bare har installeret vores app — det er en hård fejl.
+          $found = Get-ChildItem -Path "dist\SetlistManager" -Recurse -Filter "Processing.NDI*"
+          if ($found.Count -eq 0) {
+            Write-Error "NDI DLL ikke fundet i dist! Bygget mangler NDI runtime."
+            Write-Host "Files in dist:"
+            Get-ChildItem -Path "dist\SetlistManager" -Recurse -Name | Select-Object -First 50
+            exit 1
+          }
+          Write-Host "✅ NDI DLL fundet:"
+          foreach ($f in $found) { Write-Host "   - $($f.FullName)" }
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress

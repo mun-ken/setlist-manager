@@ -1641,7 +1641,7 @@ class SetlistApp:
             command=self.open_ndi_notes,
         )
         m_live.add_command(
-            label="❓ NDI ikke installeret? Klik her",
+            label="❓ Om NDI / fejlfinding",
             command=self.show_ndi_help,
         )
         m_live.add_separator()
@@ -2157,24 +2157,33 @@ class SetlistApp:
             self._ndi_capture_sender = None
 
     def show_ndi_help(self) -> None:
-        """Vis dialog med info om hvad NDI er + hvordan man installerer."""
+        """Vis dialog med info om hvad NDI er + hvordan man bruger det."""
         try:
             import ndi_output
         except ImportError as e:
             help_text = (
                 f"NDI-modulet kunne ikke loades: {e}\n\n"
-                f"Sandsynligvis mangler 'ndi-python' Python-pakken."
+                f"Dette burde ikke ske hvis du har installeret via vores "
+                f"installer — prøv at geninstallere appen."
             )
         else:
-            help_text = ndi_output.get_install_help()
             if ndi_output.is_available():
                 help_text = (
-                    "✅ NDI er klar til brug!\n\n" +
-                    "Du kan bruge:\n"
-                    "  • 'NDI Noter' — render pænt notes-billede\n"
-                    "  • 'Send Stage Mode over NDI' — grab live-vinduet\n\n"
-                    "I OBS/vMix: Tilføj 'NDI Source' og vælg navnet."
+                    "✅ NDI er klar til brug — bundlet med Setlist Manager!\n\n"
+                    "Sådan bruger du det i OBS/vMix:\n\n"
+                    "1. Klik 'Live → 🎙 NDI Noter' (eller 'Send Stage Mode')\n"
+                    "2. I OBS: installer 'OBS NDI plugin' fra\n"
+                    "   https://github.com/obs-ndi/obs-ndi/releases\n"
+                    "3. I OBS: + Tilføj kilde → NDI Source\n"
+                    "4. Vælg 'Setlist Manager Notes' (eller 'Stage')\n"
+                    "5. 🔴 LIVE!\n\n"
+                    "I vMix: Tilføj → NDI/Desktop Capture → vælg navnet.\n\n"
+                    "Tip: NDI sender over LAN — Setlist Manager og OBS\n"
+                    "behøver IKKE være på samme computer. De skal bare\n"
+                    "være på samme netværk."
                 )
+            else:
+                help_text = ndi_output.get_install_help()
 
         messagebox.showinfo("NDI — broadcast til OBS/vMix", help_text, parent=self.root)
 

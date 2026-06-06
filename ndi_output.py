@@ -52,12 +52,25 @@ try:
             "Installer med: pip install numpy"
         )
 except ImportError as e:
-    NDI_IMPORT_ERROR = str(e)
+    NDI_IMPORT_ERROR = (
+        f"NDI Python-modulet kunne ikke loades: {e}\n\n"
+        f"Hvis du har installeret Setlist Manager via vores installer "
+        f"burde det 'bare virke' — kontakt support."
+    )
 except OSError as e:
     # Manglende libndi.dll på Windows / libndi.dylib på macOS
     NDI_IMPORT_ERROR = (
-        f"NDI Runtime ikke fundet på systemet ({e}). "
-        f"Installer NDI Tools fra https://ndi.video/tools/"
+        f"NDI Runtime kunne ikke loades ({e}).\n\n"
+        f"Hvis du har installeret Setlist Manager via vores installer "
+        f"burde dette ikke ske — prøv at geninstallere appen.\n\n"
+        f"Som workaround: download NDI Tools fra https://ndi.video/tools/"
+    )
+except Exception as e:  # noqa: BLE001
+    # Ukendt fejl — typisk pga manglende C++ runtime eller lignende
+    NDI_IMPORT_ERROR = (
+        f"Uventet fejl ved load af NDI: {type(e).__name__}: {e}\n\n"
+        f"Prøv at geninstallere Setlist Manager. Hvis fejlen fortsætter, "
+        f"installer NDI Tools fra https://ndi.video/tools/"
     )
 
 

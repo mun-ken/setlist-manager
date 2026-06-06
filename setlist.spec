@@ -22,6 +22,7 @@ Build manually with:
 """
 
 import os
+from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 
@@ -30,6 +31,9 @@ ICON_PATH = os.path.join("assets", "app.ico")
 HAS_ICON = os.path.exists(ICON_PATH)
 
 datas = []
+binaries = []
+hidden_imports = ["certifi"]
+
 if HAS_ICON:
     datas.append((ICON_PATH, "assets"))
 
@@ -41,21 +45,40 @@ try:
 except ImportError:
     pass
 
-# NDI binding — hvis installeret, sørg for PyInstaller bundler den.
-# Hvis ikke: ingen problem, NDI-features bliver gråtonet i UI'et.
-hidden_imports = ["certifi"]
+# === NDI binding ===
+# ndi-python's wheel inkluderer Processing.NDI.Lib.x64.dll på Windows.
+# Vi bruger collect_all() til at sørge for at PyInstaller pakker BÅDE
+# .pyd extension-modulet OG den medfølgende DLL ind i dist-mappen.
+# Resultat: brugeren skal IKKE selv installere NDI Tools separat —
+# alt fungerer ud af kassen så snart de har installeret Setlist Manager.
 try:
     import NDIlib  # noqa: F401
+    ndi_datas, ndi_binaries, ndi_hidden = collect_all("NDIlib")
+    datas.extend(ndi_datas)
+    binaries.extend(ndi_binaries)
+    hidden_imports.extend(ndi_hidden)
     hidden_imports.append("NDIlib")
-except (ImportError, OSError):
-    # NDI Runtime ikke installeret på build-maskinen — fortsæt uden NDI
+    print(f"[setlist.spec] NDIlib bundles: {len(ndi_binaries)} binaries, "
+          f"{len(ndi_datas)} datas")
+except (ImportError, OSError) as _e:
+    # NDI Runtime ikke installeret på build-maskinen — fortsæt uden NDI.
+    # End-userens app vil så vise venlig fejlbesked hvis de prøver NDI-features.
+    print(f"[setlist.spec] NDIlib NOT bundled (import failed: {_e})")
+
+# numpy er en hård dependency for NDI (vi bruger den til BGRA-conversion).
+# Den er normalt allerede inkluderet, men vi tilføjer den eksplicit for at
+# være sikre.
+try:
+    import numpy  # noqa: F401
+    hidden_imports.append("numpy")
+except ImportError:
     pass
 
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
