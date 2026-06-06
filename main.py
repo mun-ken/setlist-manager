@@ -1658,6 +1658,13 @@ class SetlistApp:
             label="⌨️  Tilpas hotkeys…",
             command=self.open_hotkeys_dialog,
         )
+        # Toggle: globale hotkeys (virker selv hvis OBS har focus)
+        self._global_hotkeys_var = tk.BooleanVar(value=self._get_global_hotkeys_enabled())
+        m_live.add_checkbutton(
+            label="🌐  Hotkeys virker globalt (virker selv hvis OBS er foran)",
+            variable=self._global_hotkeys_var,
+            command=self._toggle_global_hotkeys,
+        )
         m_live.add_separator()
         m_live.add_command(
             label="💡 Tip: tryk F i Stage Mode for at skifte mellem fuldskærm/vindue",
@@ -2018,6 +2025,75 @@ class SetlistApp:
                     pass
 
         HotkeysDialog(self.root, bindings=current, on_apply=on_apply)
+
+    # ------------------------------------------------------------------
+    #  Globale hotkeys — virker selv hvis OBS/anden app har focus
+    # ------------------------------------------------------------------
+    def _get_global_hotkeys_enabled(self) -> bool:
+        """Læs nuværende setting (med pænt fallback hvis modul mangler)."""
+        try:
+            import global_hotkeys
+            return global_hotkeys.is_enabled()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _toggle_global_hotkeys(self) -> None:
+        """Brugeren klikkede på menu-toggle. Gem valg + opdater Stage Mode."""
+        try:
+            import global_hotkeys
+        except ImportError:
+            messagebox.showerror(
+                "Modul mangler",
+                "Kunne ikke loade global_hotkeys-modulet.",
+                parent=self.root,
+            )
+            self._global_hotkeys_var.set(False)
+            return
+
+        wanted = self._global_hotkeys_var.get()
+
+        if wanted and not global_hotkeys.GlobalHotkeys.is_supported():
+            # Brugeren prøver at slå det til, men platformen kan ikke
+            reason = global_hotkeys.GlobalHotkeys.get_unsupported_reason()
+            messagebox.showwarning(
+                "Globale hotkeys ikke understøttet",
+                reason or "Globale hotkeys virker ikke på denne platform.",
+                parent=self.root,
+            )
+            self._global_hotkeys_var.set(False)
+            return
+
+        # Gem og giv lille bekræftelse
+        global_hotkeys.set_enabled(wanted)
+
+        if wanted:
+            messagebox.showinfo(
+                "Globale hotkeys aktiveret",
+                "Hotkeys virker nu globalt — også når OBS/vMix eller andre "
+                "apps har keyboard-focus.\n\n"
+                "Træder i kraft næste gang du åbner Stage Mode.\n\n"
+                "💡 Bemærk: piletaster og mellemrum vil også styre Setlist "
+                "Manager når du fx skriver i andre programmer. Slå fra hvis "
+                "det generer.",
+                parent=self.root,
+            )
+        else:
+            messagebox.showinfo(
+                "Globale hotkeys slået fra",
+                "Hotkeys virker nu kun når Stage Mode-vinduet har "
+                "keyboard-focus (standard).",
+                parent=self.root,
+            )
+
+        # Hvis Stage Mode er åben lige nu — opdater live
+        sm = getattr(self, "_active_stage_mode", None)
+        if sm is not None:
+            try:
+                if sm.winfo_exists():
+                    # Rebind med samme bindings — _bind_keys håndterer globals
+                    sm.rebind_keys(sm.key_bindings)
+            except tk.TclError:
+                pass
 
     # ------------------------------------------------------------------
     #  NDI broadcast (til OBS/vMix/ATEM)

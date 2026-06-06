@@ -783,6 +783,10 @@ class StageMode(tk.Toplevel):
         Jump til sang 1-9 og museknapper er hardcoded (de er ikke i
         ACTIONS-registeret fordi det ville gøre konfigurations-UI'et
         unødigt komplekst).
+
+        Hvis brugeren har slået GLOBALE hotkeys til (Live → menu) registrerer
+        vi også samme bindings system-wide via keyboard-library — så pile-
+        tasterne virker selvom OBS/vMix har focus.
         """
         # Map fra action_id → metode der skal kaldes
         action_handlers = {
@@ -812,6 +816,53 @@ class StageMode(tk.Toplevel):
         self.bind("<Button-2>", self.prev_song)  # mac middle-click
         # Cursor reveal ved mouse motion
         self.bind("<Motion>", lambda e: self._show_cursor_briefly())
+
+        # === GLOBALE hotkeys (virker selv hvis OBS har focus) ===
+        self._setup_global_hotkeys(action_handlers)
+
+    def _setup_global_hotkeys(self, action_handlers: dict) -> None:
+        """Registrer globale hotkeys hvis brugeren har slået dem til.
+
+        Kaldes fra _bind_keys() — separat metode så vi kan rebind nemt.
+        """
+        # Ryd evt. tidligere registrerede globals først
+        self._teardown_global_hotkeys()
+
+        try:
+            import global_hotkeys as gh
+        except ImportError:
+            return  # modulet kan ikke loades — skip pænt
+
+        if not gh.is_enabled():
+            return  # brugeren har ikke slået det til
+
+        if not gh.GlobalHotkeys.is_supported():
+            # Tavs fallback — vis ikke fejl her, det er allerede vist
+            # når brugeren prøvede at slå det til i menuen
+            return
+
+        self._global_hotkeys = gh.GlobalHotkeys(self)
+
+        # Konverter Tk-bindings til keyboard-library format og registrer
+        for action_id, handler in action_handlers.items():
+            for tk_binding in self.key_bindings.get_keys(action_id):
+                kb_hotkey = gh.tk_binding_to_keyboard(tk_binding)
+                if kb_hotkey:
+                    # Wrap handler så det matcher signaturen (callback uden event)
+                    self._global_hotkeys.register(
+                        kb_hotkey,
+                        lambda h=handler: h(),
+                    )
+
+    def _teardown_global_hotkeys(self) -> None:
+        """Fjern alle globale hotkeys — kald ved close eller rebind."""
+        gh_instance = getattr(self, "_global_hotkeys", None)
+        if gh_instance is not None:
+            try:
+                gh_instance.unregister_all()
+            except Exception:  # noqa: BLE001
+                pass
+            self._global_hotkeys = None
 
     def rebind_keys(self, key_bindings) -> None:
         """Skift binding live (hvis brugeren åbner config-dialogen og ændrer).
@@ -875,6 +926,8 @@ class StageMode(tk.Toplevel):
 
     def close(self, _event=None) -> None:
         self._stop_cursor_timer()
+        # Fjern globale hotkeys så de ikke blokerer keyboardet for andre apps
+        self._teardown_global_hotkeys()
         try:
             self.attributes("-fullscreen", False)
         except tk.TclError:

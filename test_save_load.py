@@ -2742,6 +2742,111 @@ def test_stage_mode_has_yellow_highlight_colors() -> None:
     print("  stage_mode has yellow highlight colors OK")
 
 
+# ===========================================================================
+# v1.5.5: Globale hotkeys — virker selv hvis et andet vindue har focus
+# ===========================================================================
+def test_global_hotkeys_module_loads() -> None:
+    """Modulet skal kunne importeres — selv om keyboard-library mangler."""
+    import global_hotkeys
+    assert hasattr(global_hotkeys, "GlobalHotkeys")
+    assert hasattr(global_hotkeys, "tk_binding_to_keyboard")
+    assert hasattr(global_hotkeys, "is_enabled")
+    assert hasattr(global_hotkeys, "set_enabled")
+    print("  global_hotkeys module loads OK")
+
+
+def test_global_hotkeys_tk_to_keyboard_conversion() -> None:
+    """Konvertering fra Tkinter binding-format til keyboard-library format."""
+    from global_hotkeys import tk_binding_to_keyboard
+
+    # Specielle taster
+    assert tk_binding_to_keyboard("<space>") == "space"
+    assert tk_binding_to_keyboard("<Right>") == "right"
+    assert tk_binding_to_keyboard("<Left>") == "left"
+    assert tk_binding_to_keyboard("<Return>") == "enter"
+    assert tk_binding_to_keyboard("<Escape>") == "esc"
+    assert tk_binding_to_keyboard("<F5>") == "f5"
+
+    # Enkelt-bogstav
+    assert tk_binding_to_keyboard("f") == "f"
+    assert tk_binding_to_keyboard("Q") == "q"
+
+    # Museknapper kan ikke registreres globalt
+    assert tk_binding_to_keyboard("<Button-1>") is None
+    assert tk_binding_to_keyboard("<Button-3>") is None
+
+    # Tom string
+    assert tk_binding_to_keyboard("") is None
+
+    # Fallback for ukendte specielle taster: strip <>
+    assert tk_binding_to_keyboard("<Shift_L>") == "shift_l"
+
+    print("  global_hotkeys tk→keyboard conversion OK")
+
+
+def test_global_hotkeys_is_supported_returns_bool() -> None:
+    """is_supported() skal altid returnere en bool — uanset platform."""
+    from global_hotkeys import GlobalHotkeys
+    result = GlobalHotkeys.is_supported()
+    assert isinstance(result, bool)
+    print(f"  global_hotkeys is_supported = {result} (platform-dependent)")
+
+
+def test_global_hotkeys_unsupported_reason_is_helpful() -> None:
+    """get_unsupported_reason() skal returnere en hjælpsom besked når relevant."""
+    from global_hotkeys import GlobalHotkeys
+    reason = GlobalHotkeys.get_unsupported_reason()
+    assert isinstance(reason, str)
+    # Hvis det er understøttet: tom string. Ellers: hjælpsom besked.
+    if not GlobalHotkeys.is_supported():
+        assert len(reason) > 0, "Skal forklare hvorfor det ikke er understøttet"
+    print("  global_hotkeys reason message OK")
+
+
+def test_global_hotkeys_register_returns_false_on_unsupported() -> None:
+    """register() skal pænt returnere False (ikke crashe) på ikke-understøttet platform."""
+    if not _TK_OK:
+        print("  global_hotkeys register (skipped — Tk not available)")
+        return
+    import tkinter as tk
+    from global_hotkeys import GlobalHotkeys
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        gh = GlobalHotkeys(root)
+        if not gh.is_supported():
+            # På uunderstøttet platform skal register() returnere False
+            ok = gh.register("right", lambda: None)
+            assert ok is False, "skulle returnere False på unsupported platform"
+            assert len(gh) == 0, "ingen hooks skulle være registreret"
+        # Skal kunne kalde unregister_all() uden problemer
+        gh.unregister_all()
+        print("  global_hotkeys register safe on unsupported OK")
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+def test_global_hotkeys_enabled_setting_roundtrip() -> None:
+    """is_enabled() / set_enabled() skal kunne gemme og hente brugerens valg."""
+    import global_hotkeys
+
+    # Gem nuværende state så vi kan gendanne efter testen
+    original = global_hotkeys.is_enabled()
+    try:
+        global_hotkeys.set_enabled(True)
+        assert global_hotkeys.is_enabled() is True
+        global_hotkeys.set_enabled(False)
+        assert global_hotkeys.is_enabled() is False
+    finally:
+        # Gendan original state
+        global_hotkeys.set_enabled(original)
+    print("  global_hotkeys settings roundtrip OK")
+
+
 def test_ndi_renderer_get_current_and_next_skips_markers() -> None:
     """get_current_and_next skal springe markører over."""
     from ndi_renderer import get_current_and_next
@@ -3180,6 +3285,12 @@ def run_all() -> None:
         test_ndi_renderer_notes_use_yellow_highlighter,
         test_ndi_renderer_renders_notes_box_without_crash,
         test_stage_mode_has_yellow_highlight_colors,
+        test_global_hotkeys_module_loads,
+        test_global_hotkeys_tk_to_keyboard_conversion,
+        test_global_hotkeys_is_supported_returns_bool,
+        test_global_hotkeys_unsupported_reason_is_helpful,
+        test_global_hotkeys_register_returns_false_on_unsupported,
+        test_global_hotkeys_enabled_setting_roundtrip,
         test_ndi_renderer_get_current_and_next_skips_markers,
         test_ndi_window_does_not_crash_when_ndi_unavailable,
         test_ndi_broadcaster_module_loads,

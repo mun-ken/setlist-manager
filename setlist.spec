@@ -74,6 +74,22 @@ try:
 except ImportError:
     pass
 
+# === keyboard library (globale hotkeys) ===
+# Bruges af global_hotkeys.py så hotkeys virker selv hvis OBS har focus.
+# På Windows installerer wheel'en alt automatisk uden DLL-afhængigheder.
+try:
+    import keyboard  # noqa: F401
+    hidden_imports.append("keyboard")
+    # keyboard bruger interne plugins for hver platform — bundle dem alle
+    kb_datas, kb_binaries, kb_hidden = collect_all("keyboard")
+    datas.extend(kb_datas)
+    binaries.extend(kb_binaries)
+    hidden_imports.extend(kb_hidden)
+    print(f"[setlist.spec] keyboard bundles: {len(kb_binaries)} binaries, "
+          f"{len(kb_datas)} datas")
+except ImportError as _e:
+    print(f"[setlist.spec] keyboard NOT bundled (import failed: {_e})")
+
 
 a = Analysis(
     ["main.py"],
