@@ -109,6 +109,7 @@ class StageMode(tk.Toplevel):
         model: SetlistModel,
         start_index: int = 0,
         mode: str = "fullscreen",
+        key_bindings=None,
     ) -> None:
         """Åbn Stage Mode.
 
@@ -124,6 +125,9 @@ class StageMode(tk.Toplevel):
             "fullscreen" (default) eller "window".
             I window-mode åbnes et resizable vindue på 1280x800 i stedet
             for at tage hele skærmen.
+        key_bindings : KeyBindings, optional
+            Brugerens custom hotkey-mapping. Hvis None: indlæses fra disk
+            (eller bruger defaults hvis ingen er gemt).
         """
         super().__init__(parent)
         self.parent = parent
@@ -131,6 +135,18 @@ class StageMode(tk.Toplevel):
         self.mode = mode
         self._is_fullscreen = False  # bliver evt. overskrevet i _setup_window_mode
         self.title("Setlist Manager — Stage Mode")
+
+        # Indlæs hotkeys hvis ikke given
+        if key_bindings is None:
+            try:
+                from hotkeys import KeyBindings
+                key_bindings = KeyBindings.load()
+            except Exception:  # noqa: BLE001
+                # Fallback til hardcoded defaults hvis hotkeys-modulet
+                # ikke kan loades (skal aldrig ske, men safer than sorry)
+                from hotkeys import KeyBindings
+                key_bindings = KeyBindings()
+        self.key_bindings = key_bindings
 
         # Snapshot af setlisten (vi rører ikke modellen herfra)
         self.items: List = list(model.current_setlist.get("songs", []))
@@ -248,6 +264,35 @@ class StageMode(tk.Toplevel):
         return max(2, int(base * self._scale()))
 
     # ------------------------------------------------------------------
+    #  Hint-tekst i top-baren (viser brugerens egne hotkeys)
+    # ------------------------------------------------------------------
+    def _build_hint_text(self) -> str:
+        """Bygger en kompakt hint-streng der viser brugerens egne hotkeys.
+
+        Vi tager kun den FØRSTE binding for hver vigtig handling for at
+        holde linjen kort — fuld liste ses i Live → Tilpas hotkeys.
+        """
+        try:
+            from hotkeys import format_key
+        except ImportError:
+            return "Esc=luk · Klik=næste · Højre-klik=forrige"
+
+        def first_key(action_id: str, fallback: str = "") -> str:
+            keys = self.key_bindings.get_keys(action_id)
+            return format_key(keys[0]) if keys else fallback
+
+        close_key = first_key("close", "Esc")
+        next_key = first_key("next_song", "Mellemrum")
+        prev_key = first_key("prev_song", "← Venstre")
+        fs_key = first_key("toggle_fullscreen", "F")
+        return (
+            f"{close_key}=luk · "
+            f"Klik/{next_key}=næste · "
+            f"Højre-klik/{prev_key}=forrige · "
+            f"{fs_key}=fullscreen"
+        )
+
+    # ------------------------------------------------------------------
     #  UI construction
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -266,7 +311,7 @@ class StageMode(tk.Toplevel):
 
         self.hint_label = tk.Label(
             self.top_bar,
-            text="Esc=luk · Klik/Mellemrum=næste · Højre-klik/←=forrige · F=fullscreen",
+            text=self._build_hint_text(),
             bg=StageColors.BG, fg=StageColors.FG_HINT,
             font=self._font("hint"),
         )
@@ -705,31 +750,72 @@ class StageMode(tk.Toplevel):
     #  Key bindings
     # ------------------------------------------------------------------
     def _bind_keys(self) -> None:
-        # Næste sang
-        for k in ("<space>", "<Right>", "<Down>", "<Return>", "<KP_Enter>"):
-            self.bind(k, self.next_song)
-        # Forrige sang
-        for k in ("<Left>", "<Up>", "<BackSpace>"):
-            self.bind(k, self.prev_song)
-        # Hop først/sidst
-        self.bind("<Home>", self.go_to_first)
-        self.bind("<End>", self.go_to_last)
-        # Hop til sang 1-9
+        """Bind tastatur-genveje fra self.key_bindings.
+
+        Brugeren kan customize disse via Live → Tilpas hotkeys-menuen.
+        Jump til sang 1-9 og museknapper er hardcoded (de er ikke i
+        ACTIONS-registeret fordi det ville gøre konfigurations-UI'et
+        unødigt komplekst).
+        """
+        # Map fra action_id → metode der skal kaldes
+        action_handlers = {
+            "next_song": self.next_song,
+            "prev_song": self.prev_song,
+            "first_song": self.go_to_first,
+            "last_song": self.go_to_last,
+            "toggle_fullscreen": self._toggle_fullscreen,
+            "close": self.close,
+        }
+
+        for action_id, handler in action_handlers.items():
+            keys = self.key_bindings.get_keys(action_id)
+            for k in keys:
+                try:
+                    self.bind(k, handler)
+                except tk.TclError:
+                    # Ugyldig binding-streng — ignorer pænt
+                    pass
+
+        # Hop til sang 1-9 (hardcoded, ikke konfigurerbar)
         for n in range(1, 10):
             self.bind(str(n), lambda e, num=n: self.go_to_song_number(num))
-        # Klik = næste, højre-klik = forrige
-        # Brug bind på selve vinduet
+        # Museknapper (hardcoded — left=næste, right/middle=forrige)
         self.bind("<Button-1>", self.next_song)
         self.bind("<Button-3>", self.prev_song)
         self.bind("<Button-2>", self.prev_song)  # mac middle-click
-        # Toggle fullscreen med F
-        self.bind("f", self._toggle_fullscreen)
-        self.bind("F", self._toggle_fullscreen)
-        # Exit
-        for k in ("<Escape>", "q", "Q"):
-            self.bind(k, self.close)
         # Cursor reveal ved mouse motion
         self.bind("<Motion>", lambda e: self._show_cursor_briefly())
+
+    def rebind_keys(self, key_bindings) -> None:
+        """Skift binding live (hvis brugeren åbner config-dialogen og ændrer).
+
+        Unbinder de gamle keys og binder de nye. Sikrer at Stage Mode
+        reagerer øjeblikkeligt på ændringer uden at skulle lukke/genåbne.
+        """
+        # Unbind gamle bindings
+        old_handlers = {
+            "next_song": self.next_song,
+            "prev_song": self.prev_song,
+            "first_song": self.go_to_first,
+            "last_song": self.go_to_last,
+            "toggle_fullscreen": self._toggle_fullscreen,
+            "close": self.close,
+        }
+        for action_id in old_handlers:
+            for k in self.key_bindings.get_keys(action_id):
+                try:
+                    self.unbind(k)
+                except tk.TclError:
+                    pass
+
+        # Sæt nye + rebind
+        self.key_bindings = key_bindings
+        self._bind_keys()
+        # Opdater hint-baren med de nye tast-navne
+        try:
+            self.hint_label.configure(text=self._build_hint_text())
+        except (tk.TclError, AttributeError):
+            pass
 
     def _toggle_fullscreen(self, _event=None) -> None:
         """Skift mellem fullscreen og vindue.

@@ -1633,6 +1633,11 @@ class SetlistApp:
         )
         m_live.add_separator()
         m_live.add_command(
+            label="⌨️  Tilpas hotkeys…",
+            command=self.open_hotkeys_dialog,
+        )
+        m_live.add_separator()
+        m_live.add_command(
             label="💡 Tip: tryk F i Stage Mode for at skifte mellem fuldskærm/vindue",
             state=tk.DISABLED,
         )
@@ -1933,7 +1938,48 @@ class SetlistApp:
         start_idx = sel[0] if sel else 0
         # Gem inden vi går i scenelyset (for en sikkerheds skyld)
         self.model.autosave()
-        StageMode(self.root, self.model, start_index=start_idx, mode=mode)
+        # Hent brugerens custom hotkeys (eller defaults hvis ingen er gemt)
+        try:
+            from hotkeys import KeyBindings
+            bindings = KeyBindings.load()
+        except Exception:  # noqa: BLE001
+            bindings = None
+        self._active_stage_mode = StageMode(
+            self.root, self.model,
+            start_index=start_idx, mode=mode,
+            key_bindings=bindings,
+        )
+
+    def open_hotkeys_dialog(self) -> None:
+        """Åbn dialog til at konfigurere Stage Mode hotkeys.
+
+        Hvis Stage Mode allerede er åben, opdaterer den øjeblikkeligt
+        med de nye bindings via rebind_keys()-callback.
+        """
+        try:
+            from hotkeys import KeyBindings
+            from hotkeys_dialog import HotkeysDialog
+        except ImportError as e:
+            messagebox.showerror(
+                "Fejl",
+                f"Kunne ikke åbne hotkey-dialogen: {e}",
+                parent=self.root,
+            )
+            return
+
+        current = KeyBindings.load()
+
+        # Hvis Stage Mode er åben — opdatér live
+        def on_apply(new_bindings):
+            sm = getattr(self, "_active_stage_mode", None)
+            if sm is not None:
+                try:
+                    if sm.winfo_exists():
+                        sm.rebind_keys(new_bindings)
+                except tk.TclError:
+                    pass
+
+        HotkeysDialog(self.root, bindings=current, on_apply=on_apply)
 
     def _focus_search(self) -> None:
         self.lib_search_entry.focus_set()

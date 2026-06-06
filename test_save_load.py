@@ -2253,6 +2253,317 @@ def test_stage_mode_scroll_uses_correct_fraction_formula() -> None:
 
 
 # ===========================================================================
+#  Hotkeys module tests
+# ===========================================================================
+def test_hotkeys_module_loads() -> None:
+    """hotkeys-modulet skal kunne importeres uden fejl."""
+    import hotkeys
+    assert hasattr(hotkeys, "ACTIONS")
+    assert hasattr(hotkeys, "KeyBindings")
+    assert hasattr(hotkeys, "format_key")
+    assert hasattr(hotkeys, "event_to_binding")
+    # Standard-handlinger skal være registreret
+    for required in ("next_song", "prev_song", "first_song", "last_song",
+                     "toggle_fullscreen", "close"):
+        assert required in hotkeys.ACTIONS, f"Mangler action: {required}"
+    print("  hotkeys module loads OK")
+
+
+def test_hotkeys_default_bindings_match_legacy() -> None:
+    """Default-bindings skal matche v1.4.7's hardcoded keys så ingen
+    brugere mærker en forskel hvis de ikke konfigurerer."""
+    from hotkeys import ACTIONS, KeyBindings
+    kb = KeyBindings()
+    # Næste sang skal stadig være Space + arrows
+    nx = kb.get_keys("next_song")
+    assert "<space>" in nx
+    assert "<Right>" in nx
+    assert "<Return>" in nx
+    # Forrige
+    pv = kb.get_keys("prev_song")
+    assert "<Left>" in pv
+    assert "<Up>" in pv
+    # Close
+    cl = kb.get_keys("close")
+    assert "<Escape>" in cl
+    print("  hotkeys default bindings match legacy OK")
+
+
+def test_hotkeys_add_remove_reset() -> None:
+    """Tilføj, fjern og nulstil et binding."""
+    from hotkeys import KeyBindings
+    kb = KeyBindings()
+
+    assert kb.is_default("next_song")
+    # Tilføj en helt ny tast
+    added = kb.add_key("next_song", "<F1>")
+    assert added is True
+    assert "<F1>" in kb.get_keys("next_song")
+    assert not kb.is_default("next_song")
+
+    # Duplikat skal returnere False
+    added_again = kb.add_key("next_song", "<F1>")
+    assert added_again is False
+
+    # Fjern
+    removed = kb.remove_key("next_song", "<F1>")
+    assert removed is True
+    assert "<F1>" not in kb.get_keys("next_song")
+
+    # Reset til default
+    kb.add_key("next_song", "<F2>")
+    assert not kb.is_default("next_song")
+    kb.reset_action("next_song")
+    assert kb.is_default("next_song")
+    print("  hotkeys add/remove/reset OK")
+
+
+def test_hotkeys_find_conflict() -> None:
+    """find_conflict skal finde en tast der allerede er bundet andetsteds."""
+    from hotkeys import KeyBindings
+    kb = KeyBindings()
+    # Space er default bundet til next_song
+    conflict = kb.find_conflict("<space>")
+    assert conflict == "next_song"
+    # Hvis vi excluder next_song er der ingen konflikt
+    conflict_excluded = kb.find_conflict("<space>", exclude_action="next_song")
+    assert conflict_excluded is None
+    # En tast der IKKE er bundet
+    no_conflict = kb.find_conflict("<F12>")
+    assert no_conflict is None
+    print("  hotkeys find_conflict OK")
+
+
+def test_hotkeys_persist_to_disk_and_reload() -> None:
+    """save() + load() skal roundtrippe custom bindings."""
+    import tempfile
+    from pathlib import Path
+    from hotkeys import KeyBindings
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "hotkeys.json"
+
+        kb = KeyBindings()
+        kb.set_keys("next_song", ["<F5>", "<F6>"])
+        kb.set_keys("close", ["<F12>"])
+        kb.save(path)
+
+        assert path.exists()
+
+        kb2 = KeyBindings.load(path)
+        assert kb2.get_keys("next_song") == ["<F5>", "<F6>"]
+        assert kb2.get_keys("close") == ["<F12>"]
+        # Actions vi IKKE rørte skal stadig være default
+        assert kb2.is_default("prev_song")
+    print("  hotkeys persist + reload OK")
+
+
+def test_hotkeys_load_missing_file_returns_defaults() -> None:
+    """load() fra ikke-eksisterende fil skal IKKE crashe — bare returnere defaults."""
+    from pathlib import Path
+    from hotkeys import KeyBindings
+    kb = KeyBindings.load(Path("/does/not/exist/hotkeys.json"))
+    # Alle actions er default
+    for aid in ("next_song", "prev_song", "close"):
+        assert kb.is_default(aid)
+    print("  hotkeys load missing file OK")
+
+
+def test_hotkeys_load_corrupt_file_returns_defaults() -> None:
+    """load() fra korrupt JSON skal returnere defaults, ikke crashe."""
+    import tempfile
+    from pathlib import Path
+    from hotkeys import KeyBindings
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "corrupt.json"
+        path.write_text("not json {{{", encoding="utf-8")
+        kb = KeyBindings.load(path)
+        assert kb.is_default("next_song")
+    print("  hotkeys load corrupt file OK")
+
+
+def test_hotkeys_load_filters_unknown_actions() -> None:
+    """Hvis JSON-filen indeholder en action vi ikke kender (fra anden
+    version), skal den ignoreres — ikke crashe."""
+    import json, tempfile
+    from pathlib import Path
+    from hotkeys import KeyBindings
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "future.json"
+        path.write_text(json.dumps({
+            "next_song": ["<F1>"],
+            "future_unknown_action": ["<F2>"],  # ← ukendt
+            "another_unknown": "not even a list",  # ← ugyldig type
+        }), encoding="utf-8")
+
+        kb = KeyBindings.load(path)
+        assert kb.get_keys("next_song") == ["<F1>"]
+        # Ukendte actions skal bare være ignoreret
+        assert "future_unknown_action" not in kb.to_dict()
+    print("  hotkeys load filters unknown actions OK")
+
+
+def test_hotkeys_format_key_human_readable() -> None:
+    """format_key skal gøre Tk-syntaks til pænt dansk."""
+    from hotkeys import format_key
+    assert format_key("<space>") == "Mellemrum"
+    assert format_key("<Return>") == "Enter"
+    assert format_key("<Escape>") == "Esc"
+    assert format_key("<Right>") == "→ Højre"
+    assert format_key("F") == "F"
+    assert format_key("a") == "A"
+    assert format_key("<F5>") == "F5"
+    # Modifier-kombinationer
+    assert "Ctrl" in format_key("<Control-s>")
+    assert "S" in format_key("<Control-s>")
+    print("  hotkeys format_key OK")
+
+
+def test_hotkeys_event_to_binding_named_keys() -> None:
+    """event_to_binding skal omdanne et fake Tk-event til en gemmelig
+    binding-streng."""
+    from hotkeys import event_to_binding
+
+    class FakeEvent:
+        def __init__(self, keysym, char="", state=0):
+            self.keysym = keysym
+            self.char = char
+            self.state = state
+
+    # Mellemrum
+    assert event_to_binding(FakeEvent("space", " ")) == "<space>"
+    # F-tast
+    assert event_to_binding(FakeEvent("F5")) == "<F5>"
+    # Pile
+    assert event_to_binding(FakeEvent("Right")) == "<Right>"
+    # Bogstav uden modifier
+    assert event_to_binding(FakeEvent("a", "a")) == "a"
+    # Modifier-only events skal returnere None
+    assert event_to_binding(FakeEvent("Shift_L", "")) is None
+    assert event_to_binding(FakeEvent("Control_L", "")) is None
+    # Ctrl+S
+    out = event_to_binding(FakeEvent("s", "", state=0x0004))
+    assert "Control" in out and "s" in out
+    print("  hotkeys event_to_binding OK")
+
+
+def test_hotkeys_set_keys_dedupes() -> None:
+    """set_keys skal strippe duplikater men bevare rækkefølge."""
+    from hotkeys import KeyBindings
+    kb = KeyBindings()
+    kb.set_keys("next_song", ["<F1>", "<F2>", "<F1>", "<F3>", "<F2>"])
+    assert kb.get_keys("next_song") == ["<F1>", "<F2>", "<F3>"]
+    print("  hotkeys set_keys dedupes OK")
+
+
+def test_hotkeys_stage_mode_uses_custom_bindings() -> None:
+    """Stage Mode skal binde de keys brugeren har sat (ikke kun defaults)."""
+    if not _TK_OK:
+        print("  stage_mode uses custom bindings (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from hotkeys import KeyBindings
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        model = SetlistModel()
+        model.add_song("A")
+        model.current_setlist["songs"] = ["A"]
+
+        # Custom bindings: brug F1 som "next" i stedet for Space
+        kb = KeyBindings()
+        kb.set_keys("next_song", ["<F1>"])
+        kb.set_keys("close", ["<F12>"])
+
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                return False
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            sm = stage_mode.StageMode(root, model, mode="window", key_bindings=kb)
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+
+        try:
+            # bind() returnerer et bind-script (truthy) hvis bundet, "" hvis ikke
+            f1_binding = sm.bind("<F1>")
+            f12_binding = sm.bind("<F12>")
+            space_binding = sm.bind("<space>")  # ikke længere bundet
+
+            assert f1_binding, "F1 burde være bundet til next_song"
+            assert f12_binding, "F12 burde være bundet til close"
+            # Space er ikke i kb.get_keys('next_song') → skal IKKE være bundet
+            assert not space_binding, \
+                f"<space> burde IKKE være bundet når kb kun har F1: got {space_binding!r}"
+        finally:
+            sm.close()
+        print("  stage_mode uses custom bindings OK")
+    finally:
+        root.destroy()
+
+
+def test_hotkeys_stage_mode_rebind_changes_live() -> None:
+    """rebind_keys() skal opdatere bindings uden at lukke vinduet."""
+    if not _TK_OK:
+        print("  stage_mode rebind live (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from hotkeys import KeyBindings
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        model = SetlistModel()
+        model.add_song("A")
+        model.current_setlist["songs"] = ["A"]
+
+        kb_initial = KeyBindings()  # defaults
+
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                return False
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            sm = stage_mode.StageMode(root, model, mode="window", key_bindings=kb_initial)
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+
+        try:
+            # Default: <space> bundet
+            assert sm.bind("<space>"), "Default skal binde <space>"
+
+            # Skift bindings live
+            kb_new = KeyBindings()
+            kb_new.set_keys("next_song", ["<F7>"])
+            sm.rebind_keys(kb_new)
+
+            assert sm.bind("<F7>"), "Efter rebind skal <F7> være bundet"
+            # Space skal nu være UNBOUND
+            assert not sm.bind("<space>"), \
+                "Efter rebind til F7 skal <space> ikke længere være bundet"
+        finally:
+            sm.close()
+        print("  stage_mode rebind changes live OK")
+    finally:
+        root.destroy()
+
+
+# ===========================================================================
 def run_all() -> None:
     tests = [
         test_basic_save_load_roundtrip,
@@ -2359,6 +2670,19 @@ def run_all() -> None:
         test_stage_mode_supports_window_mode,
         test_stage_mode_font_scales_with_window_size,
         test_stage_mode_scroll_uses_correct_fraction_formula,
+        test_hotkeys_module_loads,
+        test_hotkeys_default_bindings_match_legacy,
+        test_hotkeys_add_remove_reset,
+        test_hotkeys_find_conflict,
+        test_hotkeys_persist_to_disk_and_reload,
+        test_hotkeys_load_missing_file_returns_defaults,
+        test_hotkeys_load_corrupt_file_returns_defaults,
+        test_hotkeys_load_filters_unknown_actions,
+        test_hotkeys_format_key_human_readable,
+        test_hotkeys_event_to_binding_named_keys,
+        test_hotkeys_set_keys_dedupes,
+        test_hotkeys_stage_mode_uses_custom_bindings,
+        test_hotkeys_stage_mode_rebind_changes_live,
     ]
     print(f"Running {len(tests)} tests...")
     for t in tests:
