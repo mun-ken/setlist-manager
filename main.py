@@ -1616,6 +1616,16 @@ class SetlistApp:
             accelerator="F5",
             command=self.open_stage_mode,
         )
+        m_live.add_command(
+            label="🪟 Start Stage Mode (i vindue)",
+            accelerator="F6",
+            command=self.open_stage_mode_window,
+        )
+        m_live.add_separator()
+        m_live.add_command(
+            label="💡 Tip: tryk F i Stage Mode for at skifte mellem fuldskærm/vindue",
+            state=tk.DISABLED,
+        )
         menubar.add_cascade(label="Live", menu=m_live)
 
         m_help = tk.Menu(menubar, tearoff=0)
@@ -1633,6 +1643,7 @@ class SetlistApp:
         self.root.bind("<Control-p>", lambda e: self.export_print())
         self.root.bind("<Control-f>", lambda e: self._focus_search())
         self.root.bind("<F5>", lambda e: self.open_stage_mode())
+        self.root.bind("<F6>", lambda e: self.open_stage_mode_window())
 
     def _build_top_bar(self) -> None:
         wrap = ttk.Frame(self.root, padding=(8, 6, 8, 2))
@@ -1675,7 +1686,14 @@ class SetlistApp:
         ttk.Button(row2, text="Omdøb", command=self.rename_setlist).pack(side=tk.LEFT, padx=2)
         ttk.Button(row2, text="Slet", command=self.delete_setlist).pack(side=tk.LEFT, padx=2)
 
-        # Stage Mode-knap til højre — accent-styled så den er let at se
+        # Stage Mode-knapper til højre — accent-styled så de er let at se
+        # Hovedknap = fuldskærm (mest brugt på scenen)
+        # Lille knap ved siden af = vindue-mode (godt til at øve)
+        ttk.Button(
+            row2, text="🪟  Vindue",
+            style="Subtle.TButton",
+            command=self.open_stage_mode_window,
+        ).pack(side=tk.RIGHT, padx=(2, 0))
         ttk.Button(
             row2, text="🎬  Stage Mode",
             style="Accent.TButton",
@@ -1881,6 +1899,17 @@ class SetlistApp:
         Hvis brugeren har valgt en sang i setlisten, start dér — ellers
         start fra første sang.
         """
+        self._launch_stage_mode("fullscreen")
+
+    def open_stage_mode_window(self) -> None:
+        """Åbn Stage Mode i et resizable vindue (ikke fuldskærm).
+
+        Praktisk når man øver foran computeren og samtidig vil have
+        andre vinduer synlige."""
+        self._launch_stage_mode("window")
+
+    def _launch_stage_mode(self, mode: str) -> None:
+        """Fælles launcher for både fullscreen og window mode."""
         songs = self.model.current_setlist.get("songs", [])
         if not songs:
             messagebox.showinfo(
@@ -1894,7 +1923,7 @@ class SetlistApp:
         start_idx = sel[0] if sel else 0
         # Gem inden vi går i scenelyset (for en sikkerheds skyld)
         self.model.autosave()
-        StageMode(self.root, self.model, start_index=start_idx)
+        StageMode(self.root, self.model, start_index=start_idx, mode=mode)
 
     def _focus_search(self) -> None:
         self.lib_search_entry.focus_set()

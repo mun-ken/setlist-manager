@@ -1981,6 +1981,150 @@ def test_stage_mode_go_to_song_number() -> None:
         root.destroy()
 
 
+def test_stage_mode_supports_window_mode() -> None:
+    """Stage Mode skal kunne åbnes i 'window' mode (ikke fullscreen).
+
+    I window-mode skal vinduet være resizable og IKKE have -fullscreen sat.
+    """
+    if not _TK_OK:
+        print("  stage_mode window-mode (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        model = SetlistModel()
+        model.add_song("X")
+
+        # Patch attributes så vi kan tracke fullscreen-kald
+        fullscreen_calls = []
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                if len(args) > 1:
+                    fullscreen_calls.append(args[1])
+                return False
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            # 1) Test window-mode — må IKKE kalde attributes("-fullscreen", True)
+            sm = stage_mode.StageMode(root, model, mode="window")
+            assert sm.mode == "window"
+            assert sm._is_fullscreen is False, \
+                "I window-mode skal _is_fullscreen være False"
+            # Ingen True-kald til fullscreen
+            assert True not in fullscreen_calls, \
+                f"window-mode skal IKKE aktivere fullscreen — fik {fullscreen_calls!r}"
+            sm.close()
+            fullscreen_calls.clear()
+
+            # 2) Test fullscreen-mode (default) — SKAL kalde med True
+            sm = stage_mode.StageMode(root, model, mode="fullscreen")
+            assert sm.mode == "fullscreen"
+            # I fullscreen-mode skal _is_fullscreen være True
+            # (men fake_attributes returnerer False, så hvis vi ikke har
+            # ramt except-grenen, er True blevet bedt om)
+            assert True in fullscreen_calls, \
+                f"fullscreen-mode skal aktivere fullscreen — fik {fullscreen_calls!r}"
+            sm.close()
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+        print("  stage_mode supports window-mode OK")
+    finally:
+        root.destroy()
+
+
+def test_stage_mode_font_scales_with_window_size() -> None:
+    """Stage Mode skal skalere fonts efter vinduehøjden.
+
+    Ved REF_HEIGHT (1000px) får vi BASE_FONTS sizes.
+    Halv størrelse → halv font (modulo min-grænse).
+    Dobbelt størrelse → dobbelt font (modulo max-grænse).
+    """
+    if not _TK_OK:
+        print("  stage_mode font scaling (skipped — Tk not available)")
+        return
+
+    import tkinter as tk
+    import stage_mode
+    from setlist_model import SetlistModel
+
+    root = tk.Tk()
+    root.withdraw()
+
+    try:
+        model = SetlistModel()
+        model.add_song("A")
+
+        original_attributes = tk.Toplevel.attributes
+        def fake_attributes(self, *args, **kw):
+            if args and args[0] == "-fullscreen":
+                return False
+            return original_attributes(self, *args, **kw)
+        tk.Toplevel.attributes = fake_attributes  # type: ignore[assignment]
+
+        try:
+            sm = stage_mode.StageMode(root, model, mode="window")
+        finally:
+            tk.Toplevel.attributes = original_attributes  # type: ignore[assignment]
+
+        try:
+            ref = stage_mode.StageMode.REF_HEIGHT
+            base = stage_mode.StageMode.BASE_FONTS["current_main"]  # 72
+
+            # Mock winfo_height så vi kan styre skalering deterministisk
+            def fake_height(h):
+                return lambda: h
+
+            # 1.0 scale = REF_HEIGHT
+            sm.winfo_height = fake_height(ref)  # type: ignore[method-assign]
+            assert sm._scale() == 1.0
+            font = sm._font("current_main", weight="bold")
+            assert font[1] == base, f"At ref-height: expected {base}, got {font[1]}"
+
+            # 0.5 scale = halv height
+            sm.winfo_height = fake_height(ref // 2)  # type: ignore[method-assign]
+            assert sm._scale() == 0.5
+            font = sm._font("current_main")
+            assert font[1] == base // 2, f"At half: expected {base//2}, got {font[1]}"
+
+            # Min-grænse: meget lille vindue
+            sm.winfo_height = fake_height(50)  # type: ignore[method-assign]
+            assert sm._scale() == stage_mode.StageMode.MIN_SCALE
+            font = sm._font("current_main")
+            min_expected = int(base * stage_mode.StageMode.MIN_SCALE)
+            assert font[1] == min_expected, \
+                f"At min-grænse: expected {min_expected}, got {font[1]}"
+
+            # Max-grænse: kæmpe vindue
+            sm.winfo_height = fake_height(10000)  # type: ignore[method-assign]
+            assert sm._scale() == stage_mode.StageMode.MAX_SCALE
+            font = sm._font("current_main")
+            max_expected = int(base * stage_mode.StageMode.MAX_SCALE)
+            assert font[1] == max_expected, \
+                f"At max-grænse: expected {max_expected}, got {font[1]}"
+
+            # Font-tuple struktur: ("Segoe UI", size) eller (..., "bold")
+            font = sm._font("current_main", weight="bold")
+            assert font[0] == stage_mode.StageMode.FONT_FAMILY
+            assert font[2] == "bold"
+
+            # Italic + bold
+            font = sm._font("marker", weight="bold", italic=True)
+            assert "bold" in font[2] and "italic" in font[2]
+        finally:
+            sm.close()
+        print("  stage_mode font scales with window size OK")
+    finally:
+        root.destroy()
+
+
 # ===========================================================================
 def run_all() -> None:
     tests = [
@@ -2085,6 +2229,8 @@ def run_all() -> None:
         test_stage_mode_navigation_skips_markers,
         test_stage_mode_start_index_on_marker_skips_forward,
         test_stage_mode_go_to_song_number,
+        test_stage_mode_supports_window_mode,
+        test_stage_mode_font_scales_with_window_size,
     ]
     print(f"Running {len(tests)} tests...")
     for t in tests:

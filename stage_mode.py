@@ -1,4 +1,12 @@
-"""Stage Mode — fuldskærm setliste-visning til live performance.
+"""Stage Mode — setliste-visning til live performance.
+
+To modes:
+  * "fullscreen" → tag hele skærmen (default, perfekt på scenen)
+  * "window"     → almindeligt resizable vindue (godt til at øve på din PC)
+
+I begge modes skalerer al tekst dynamisk efter vinduesstørrelsen — så det
+ser pænt ud uanset om det er på en kæmpe TV-skærm eller et lille vindue
+på laptoppen. F-tasten skifter mellem fullscreen og vindue når som helst.
 
 Sort baggrund, kæmpe hvid tekst, nuværende sang fremhævet midt på skærmen.
 Designet til at blive vist på en bærbar/iPad på scenen — så hele bandet
@@ -12,7 +20,7 @@ Tastatur-kontroller:
     Esc / q                        → Luk Stage Mode
     Klik (venstre)                 → Næste sang
     Klik (højre)                   → Forrige sang
-    F                              → Toggle fullscreen
+    F                              → Toggle fullscreen ↔ vindue
 """
 
 from __future__ import annotations
@@ -57,17 +65,66 @@ class StageColors:
 #  Stage Mode dialog (Toplevel)
 # ===========================================================================
 class StageMode(tk.Toplevel):
-    """Fuldskærms setliste-visning. Lukker med Esc."""
+    """Setliste-visning til live performance — fuldskærm eller vindue.
+
+    Lukker med Esc. Toggler mellem fullscreen og vindue med F.
+    """
 
     # Font-stack — falder pænt tilbage hvis Segoe UI ikke findes (Mac/Linux)
     FONT_FAMILY = "Segoe UI"
+
+    # ------------------------------------------------------------------
+    #  Skalering — alt skalerer proportionalt med vinduehøjden
+    #  REF_HEIGHT er den "perfekte" højde (en typisk fuldskærm 1080p
+    #  har ~1040px brugbar højde). Ved den højde får man de "kanoniske"
+    #  font-størrelser herunder. Mindre/større vinduer skalerer pro rata.
+    # ------------------------------------------------------------------
+    REF_HEIGHT = 1000
+    MIN_SCALE = 0.35   # selv et meget lille vindue skal stadig kunne læses
+    MAX_SCALE = 1.6    # selv en kæmpe TV-skærm skal ikke se grotesk ud
+
+    # Kanoniske font-størrelser ved REF_HEIGHT (pixels)
+    BASE_FONTS = {
+        "current_main":   72,   # nuværende sang (KÆMPE)
+        "current_meta":   28,   # toneart/varighed på current
+        "current_ind":    44,   # ▶ indikator
+        "next_main":      36,   # kommende sange
+        "next_meta":      19,   # meta på kommende
+        "past_main":      24,   # forbi-sange (dæmpede)
+        "past_meta":      14,   # meta på forbi-sange
+        "marker":         24,   # ── PAUSE ── osv
+        "top_bar":        16,   # "🎤 Setliste · Sang 3 af 12"
+        "hint":           11,   # tastatur-hint i top højre
+        "notes":          22,   # noter i bunden
+    }
+
+    # Padding ved current-row (også skaleret)
+    BASE_PADY_CURRENT = 22
+    BASE_PADY_NEXT = 8
+    BASE_PADY_PAST = 4
 
     def __init__(
         self,
         parent: tk.Misc,
         model: SetlistModel,
         start_index: int = 0,
+        mode: str = "fullscreen",
     ) -> None:
+        """Åbn Stage Mode.
+
+        Parameters
+        ----------
+        parent : tk.Misc
+            Forældre-vinduet (typisk root)
+        model : SetlistModel
+            Modellen — vi læser kun, vi muterer ikke
+        start_index : int
+            Hvilken sang i setlisten der starter som "current"
+        mode : str
+            "fullscreen" (default) eller "window".
+            I window-mode åbnes et resizable vindue på 1280x800 i stedet
+            for at tage hele skærmen.
+        """
         super().__init__(parent)
         self.parent = parent
         self.model = model
@@ -95,16 +152,14 @@ class StageMode(tk.Toplevel):
         self._cursor_hidden = False
         self._cursor_after_id: str | None = None
 
-        # === Vindue setup ===
+        # Resize-debounce state
+        self._resize_after_id: str | None = None
+        self._last_built_scale: float = -1.0  # tving første build
+
+        # === Vindue setup baseret på mode ===
         self.configure(bg=StageColors.BG)
-        # Sikkerhedsnet: hvis fullscreen fejler (sjældent, men sker i nogle
-        # window managers) så maxer vi i stedet bare vinduet
-        try:
-            self.attributes("-fullscreen", True)
-            self._is_fullscreen = True
-        except tk.TclError:
-            self.state("zoomed") if self._can_zoom() else self.geometry("1600x900")
-            self._is_fullscreen = False
+        self.mode = mode
+        self._setup_window_mode(mode)
 
         self.lift()
         self.focus_force()
@@ -112,7 +167,9 @@ class StageMode(tk.Toplevel):
         # Build UI + bind keys
         self._build_ui()
         self._bind_keys()
-        self._refresh()
+        # Vent et øjeblik så vinduet får sin størrelse, så bygger vi
+        # første refresh med korrekt skala
+        self.after(50, self._refresh)
         self._start_cursor_timer()
 
         # Grab så main-vinduet er låst mens vi er i stage mode
@@ -122,44 +179,98 @@ class StageMode(tk.Toplevel):
             pass
 
     # ------------------------------------------------------------------
-    #  Hjælpe-checks
+    #  Window mode setup
     # ------------------------------------------------------------------
-    def _can_zoom(self) -> bool:
-        """state('zoomed') findes kun på Windows."""
+    def _setup_window_mode(self, mode: str) -> None:
+        """Sæt vinduet op enten som fuldskærm eller normalt vindue."""
+        if mode == "fullscreen":
+            try:
+                self.attributes("-fullscreen", True)
+                self._is_fullscreen = True
+                return
+            except tk.TclError:
+                pass  # fald igennem til window-mode hvis fullscreen fejler
+
+        # Window-mode (default eller fallback fra failed fullscreen)
+        self._is_fullscreen = False
+        # En behagelig default-størrelse — stor nok til at se rigtig ud,
+        # men ikke så stor at det blokerer alt på en lille skærm
         try:
-            self.state("normal")
-            return True
+            # Brug max 90% af skærmen
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            w = min(1400, int(sw * 0.85))
+            h = min(900, int(sh * 0.85))
+            # Centrer
+            x = (sw - w) // 2
+            y = (sh - h) // 2
+            self.geometry(f"{w}x{h}+{x}+{y}")
         except tk.TclError:
-            return False
+            self.geometry("1280x800")
+        self.resizable(True, True)
+        self.minsize(600, 400)
+
+    # ------------------------------------------------------------------
+    #  Skalerings-helpers
+    # ------------------------------------------------------------------
+    def _scale(self) -> float:
+        """Returnerer skaleringsfaktor baseret på nuværende vindueshøjde.
+
+        1.0 = REF_HEIGHT. Større vinduer → større tekst.
+        Begrænset af MIN_SCALE / MAX_SCALE så det ikke bliver absurd.
+        """
+        try:
+            h = self.winfo_height()
+            if h < 100:
+                return 1.0  # vinduet er ikke initialiseret endnu
+            return max(self.MIN_SCALE, min(self.MAX_SCALE, h / self.REF_HEIGHT))
+        except tk.TclError:
+            return 1.0
+
+    def _font(self, key: str, *, weight: str = "normal", italic: bool = False) -> tuple:
+        """Returnér en font-tuple for given key (skaleret efter vinduet)."""
+        size = max(8, int(self.BASE_FONTS[key] * self._scale()))
+        styles = []
+        if weight == "bold":
+            styles.append("bold")
+        if italic:
+            styles.append("italic")
+        if styles:
+            return (self.FONT_FAMILY, size, " ".join(styles))
+        return (self.FONT_FAMILY, size)
+
+    def _padding(self, base: int) -> int:
+        """Skalér en padding-værdi efter vinduet."""
+        return max(2, int(base * self._scale()))
 
     # ------------------------------------------------------------------
     #  UI construction
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         # --- Top bar (lille — setliste-navn + sang X/Y + hint) ---
-        top = tk.Frame(self, bg=StageColors.BG, height=60)
-        top.pack(side=tk.TOP, fill=tk.X)
-        top.pack_propagate(False)
+        self.top_bar = tk.Frame(self, bg=StageColors.BG)
+        self.top_bar.pack(side=tk.TOP, fill=tk.X)
 
         self.top_left_var = tk.StringVar(value="")
-        tk.Label(
-            top, textvariable=self.top_left_var,
+        self.top_label = tk.Label(
+            self.top_bar, textvariable=self.top_left_var,
             bg=StageColors.BG, fg=StageColors.FG_TOP,
-            font=(self.FONT_FAMILY, 16, "bold"),
+            font=self._font("top_bar", weight="bold"),
             anchor="w",
-        ).pack(side=tk.LEFT, padx=32, pady=12)
+        )
+        self.top_label.pack(side=tk.LEFT, padx=32, pady=12)
 
-        tk.Label(
-            top,
-            text="Esc = luk    ·    Klik / Mellemrum = næste    ·    Højre-klik / ← = forrige",
+        self.hint_label = tk.Label(
+            self.top_bar,
+            text="Esc=luk · Klik/Mellemrum=næste · Højre-klik/←=forrige · F=fullscreen",
             bg=StageColors.BG, fg=StageColors.FG_HINT,
-            font=(self.FONT_FAMILY, 11),
-        ).pack(side=tk.RIGHT, padx=32)
+            font=self._font("hint"),
+        )
+        self.hint_label.pack(side=tk.RIGHT, padx=32, pady=12)
 
         # --- Notes-area (BUNDEN) — pakkes FØR canvas så den ikke overlapper ---
-        self.notes_frame = tk.Frame(self, bg=StageColors.NOTES_BG, height=140)
+        self.notes_frame = tk.Frame(self, bg=StageColors.NOTES_BG)
         self.notes_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        self.notes_frame.pack_propagate(False)
 
         # En lille divider-linje
         tk.Frame(self.notes_frame, bg="#252528", height=1).pack(
@@ -170,8 +281,8 @@ class StageMode(tk.Toplevel):
         self.notes_label = tk.Label(
             self.notes_frame, textvariable=self.notes_var,
             bg=StageColors.NOTES_BG, fg=StageColors.NOTES_FG,
-            font=(self.FONT_FAMILY, 20),
-            wraplength=1600, justify="left",
+            font=self._font("notes"),
+            wraplength=2000, justify="left",
             anchor="w",
         )
         self.notes_label.pack(fill=tk.BOTH, expand=True, padx=40, pady=14)
@@ -198,6 +309,11 @@ class StageMode(tk.Toplevel):
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
             # Re-scroll til current efter resize
             self.after_idle(self._scroll_to_current)
+            # Opdater også notes wraplength så lange noter brydes pænt
+            try:
+                self.notes_label.configure(wraplength=max(400, event.width - 100))
+            except tk.TclError:
+                pass
 
         def on_inner_configure(_event):
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -215,6 +331,42 @@ class StageMode(tk.Toplevel):
         self.canvas.bind("<MouseWheel>", on_mousewheel)
         self.bind_all("<MouseWheel>", on_mousewheel, add="+")
 
+        # --- Resize-binding: når vinduet ændres, skalér alt ---
+        # Debounce med 200ms så vi ikke rebuild'er ved hver pixel under drag
+        self.bind("<Configure>", self._on_resize_window)
+
+    # ------------------------------------------------------------------
+    #  Resize-handler — debounce og rebuild ved meningsfuld ændring
+    # ------------------------------------------------------------------
+    def _on_resize_window(self, event) -> None:
+        """Kaldes når vinduet ændrer størrelse (drag eller mode-skift).
+
+        Vi debouncer med 150ms så vi ikke rebuild'er widgets ved hver pixel
+        under et drag. Rebuild kun hvis skalaen faktisk har ændret sig
+        nævneværdigt (>5%) — så små bevægelser ignoreres.
+        """
+        # Kun resize-events fra selve top-level (ikke fra børn)
+        if event.widget is not self:
+            return
+        if self._resize_after_id is not None:
+            try:
+                self.after_cancel(self._resize_after_id)
+            except tk.TclError:
+                pass
+        self._resize_after_id = self.after(150, self._maybe_rebuild_after_resize)
+
+    def _maybe_rebuild_after_resize(self) -> None:
+        """Kaldes 150ms efter sidste resize. Rebuild kun hvis skalaen
+        har ændret sig nævneværdigt — så vi sparer arbejde ved små
+        bevægelser."""
+        self._resize_after_id = None
+        cur_scale = self._scale()
+        if self._last_built_scale > 0:
+            delta = abs(cur_scale - self._last_built_scale) / self._last_built_scale
+            if delta < 0.03:  # mindre end 3% ændring → skip
+                return
+        self._refresh()
+
     # ------------------------------------------------------------------
     #  Bygger / opdaterer sang-widgets
     # ------------------------------------------------------------------
@@ -225,6 +377,18 @@ class StageMode(tk.Toplevel):
             w.destroy()
         self.song_widgets = []
 
+        # Husk den skala vi byggede med — så _maybe_rebuild_after_resize
+        # kan se om der er ændret nok til at retfærdiggøre genbygning
+        self._last_built_scale = self._scale()
+
+        # Opdater fonts på top + notes labels (de blev bygget i _build_ui)
+        try:
+            self.top_label.configure(font=self._font("top_bar", weight="bold"))
+            self.hint_label.configure(font=self._font("hint"))
+            self.notes_label.configure(font=self._font("notes"))
+        except tk.TclError:
+            pass
+
         song_num = 0
         for i, item in enumerate(self.items):
             if is_marker_item(item):
@@ -232,11 +396,11 @@ class StageMode(tk.Toplevel):
             else:
                 song_num += 1
                 w = self._make_song_row(item_song_name(item), i, song_num)
-            w.pack(fill=tk.X, padx=20, pady=0)
+            w.pack(fill=tk.X, padx=self._padding(20), pady=0)
             self.song_widgets.append(w)
 
         # Lidt luft i bunden så sidste sang ikke klistrer
-        spacer = tk.Frame(self.inner, bg=StageColors.BG, height=300)
+        spacer = tk.Frame(self.inner, bg=StageColors.BG, height=self._padding(300))
         spacer.pack(fill=tk.X)
         self.song_widgets.append(spacer)
 
@@ -263,31 +427,32 @@ class StageMode(tk.Toplevel):
         if is_current:
             bg = StageColors.BG_CURRENT
             fg = StageColors.FG_CURRENT
-            font_main = (self.FONT_FAMILY, 64, "bold")
-            font_meta = (self.FONT_FAMILY, 26)
+            font_main = self._font("current_main", weight="bold")
+            font_meta = self._font("current_meta")
             fg_meta = StageColors.FG_META_CURRENT
-            pady = 22
+            pady = self._padding(self.BASE_PADY_CURRENT)
         elif is_past:
             bg = StageColors.BG
             fg = StageColors.FG_PAST
-            font_main = (self.FONT_FAMILY, 26)
-            font_meta = (self.FONT_FAMILY, 15)
+            font_main = self._font("past_main")
+            font_meta = self._font("past_meta")
             fg_meta = StageColors.FG_PAST
-            pady = 4
+            pady = self._padding(self.BASE_PADY_PAST)
         else:
             bg = StageColors.BG
             fg = StageColors.FG_NEXT
-            font_main = (self.FONT_FAMILY, 36)
-            font_meta = (self.FONT_FAMILY, 19)
+            font_main = self._font("next_main")
+            font_meta = self._font("next_meta")
             fg_meta = StageColors.FG_META
-            pady = 8
+            pady = self._padding(self.BASE_PADY_NEXT)
 
         # Container (med evt. venstre-stribe ved current)
         outer = tk.Frame(self.inner, bg=bg)
 
-        # Grøn accent-stribe ved current sang
+        # Grøn accent-stribe ved current sang — skalér også bredden
         if is_current:
-            stripe = tk.Frame(outer, bg=StageColors.BORDER_CURRENT, width=6)
+            stripe_w = max(3, int(6 * self._scale()))
+            stripe = tk.Frame(outer, bg=StageColors.BORDER_CURRENT, width=stripe_w)
             stripe.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 0))
 
         inner = tk.Frame(outer, bg=bg)
@@ -298,22 +463,22 @@ class StageMode(tk.Toplevel):
             inner, text=f"{song_num}.",
             bg=bg, fg=fg,
             font=font_main, width=4, anchor="e",
-        ).pack(side=tk.LEFT, padx=(20, 16), pady=pady)
+        ).pack(side=tk.LEFT, padx=(self._padding(20), self._padding(16)), pady=pady)
 
         # ▶ indikator kun ved current
         if is_current:
             tk.Label(
                 inner, text="▶",
                 bg=bg, fg=StageColors.FG_INDICATOR,
-                font=(self.FONT_FAMILY, 36, "bold"),
-            ).pack(side=tk.LEFT, padx=(0, 16), pady=pady)
+                font=self._font("current_ind", weight="bold"),
+            ).pack(side=tk.LEFT, padx=(0, self._padding(16)), pady=pady)
 
         # Navn (venstre-justeret, fylder)
         tk.Label(
             inner, text=name,
             bg=bg, fg=fg,
             font=font_main, anchor="w",
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 20), pady=pady)
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, self._padding(20)), pady=pady)
 
         # Meta (toneart, varighed) til højre
         song = self.model.get_song(name) or new_song(name)
@@ -323,7 +488,7 @@ class StageMode(tk.Toplevel):
                 inner, text="   ·   ".join(extras),
                 bg=bg, fg=fg_meta,
                 font=font_meta,
-            ).pack(side=tk.RIGHT, padx=(0, 32), pady=pady)
+            ).pack(side=tk.RIGHT, padx=(0, self._padding(32)), pady=pady)
 
         return outer
 
@@ -332,8 +497,8 @@ class StageMode(tk.Toplevel):
         tk.Label(
             frm, text=f"── {label} ──",
             bg=StageColors.BG, fg=StageColors.FG_MARKER,
-            font=(self.FONT_FAMILY, 22, "italic", "bold"),
-        ).pack(pady=(28, 16))
+            font=self._font("marker", weight="bold", italic=True),
+        ).pack(pady=(self._padding(28), self._padding(16)))
         return frm
 
     # ------------------------------------------------------------------
@@ -485,9 +650,31 @@ class StageMode(tk.Toplevel):
         self.bind("<Motion>", lambda e: self._show_cursor_briefly())
 
     def _toggle_fullscreen(self, _event=None) -> None:
+        """Skift mellem fullscreen og vindue.
+
+        Når man går FRA fullscreen TIL vindue: brug en pæn default-størrelse.
+        Når man går FRA vindue TIL fullscreen: spring direkte til fullscreen.
+        """
         try:
             self._is_fullscreen = not self._is_fullscreen
-            self.attributes("-fullscreen", self._is_fullscreen)
+            if self._is_fullscreen:
+                self.attributes("-fullscreen", True)
+            else:
+                # Gå tilbage til vindue — sæt en behagelig størrelse
+                self.attributes("-fullscreen", False)
+                try:
+                    sw = self.winfo_screenwidth()
+                    sh = self.winfo_screenheight()
+                    w = min(1400, int(sw * 0.85))
+                    h = min(900, int(sh * 0.85))
+                    x = (sw - w) // 2
+                    y = (sh - h) // 2
+                    self.geometry(f"{w}x{h}+{x}+{y}")
+                except tk.TclError:
+                    pass
+                self.resizable(True, True)
+            # Den nye størrelse trigger _on_resize_window som rebuilder
+            # med rette skala
         except tk.TclError:
             pass
 
