@@ -16,9 +16,6 @@ certifi>=2024.0.0
 numpy>=1.24
 ndi-python>=5.1.1.5; platform_system == "Windows" or platform_system == "Darwin"
 
-# Globale hotkeys (Live mode — virker selv hvis OBS har focus):
-# keyboard-library bruger et lavt-niveau keyboard hook. På Windows kræver
-# det INGEN admin/elevation. På macOS kræver det "Accessibility"-permission
-# (brugeren bliver bedt om det første gang). På Linux kræver det typisk root
-# og er derfor ikke pålideligt — vi falder pænt tilbage til vindue-focus.
-keyboard>=0.13.5; platform_system == "Windows" or platform_system == "Darwin"
+# v1.6.0: Stream Deck / Bitfocus Companion-styring sker nu udelukkende via
+# web-API'et (http://<pc-ip>:8765/api/next|/prev|/goto/<n>). Det fjernede
+# behovet for keyboard-library + hele hotkey-config-systemet.

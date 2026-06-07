@@ -1602,6 +1602,10 @@ class SetlistApp:
         self.refresh_all()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Auto-start web-server så bandet + Stream Deck altid kan tilgå den
+        # (kører i baggrunden — fejler stille hvis port er optaget)
+        self.root.after(100, self._auto_start_web_server)
+
         # Tjek for opdateringer i baggrunden (lidt efter GUI er klar)
         self.root.after(UPDATE_CHECK_DELAY_MS, self._maybe_auto_check_update)
 
@@ -1632,12 +1636,10 @@ class SetlistApp:
         m_live = tk.Menu(menubar, tearoff=0)
         m_live.add_command(
             label="🎬 Start Stage Mode (fuldskærm)",
-            accelerator="F5",
             command=self.open_stage_mode,
         )
         m_live.add_command(
             label="🪟 Start Stage Mode (i vindue)",
-            accelerator="F6",
             command=self.open_stage_mode_window,
         )
         m_live.add_separator()
@@ -1653,40 +1655,11 @@ class SetlistApp:
             label="⏹  Stop NDI broadcast",
             command=self.stop_ndi_broadcast,
         )
-        m_live.add_command(
-            label="❓ Om NDI / fejlfinding",
-            command=self.show_ndi_help,
-        )
         m_live.add_separator()
-        # === Web-server (band-telefoner kan se setlisten live) ===
+        # === Web-server (band-telefoner + Stream Deck — kører altid) ===
         m_live.add_command(
-            label="🌐  Start web-visning (telefoner på samme netværk)…",
-            command=self.start_web_server,
-        )
-        m_live.add_command(
-            label="⏹  Stop web-visning",
-            command=self.stop_web_server,
-        )
-        m_live.add_command(
-            label="🔗  Vis web-URL",
+            label="🔗  Vis web-adresser (telefoner + Stream Deck)…",
             command=self.show_web_urls,
-        )
-        m_live.add_separator()
-        m_live.add_command(
-            label="⌨️  Tilpas hotkeys…",
-            command=self.open_hotkeys_dialog,
-        )
-        # Toggle: globale hotkeys (virker selv hvis OBS har focus)
-        self._global_hotkeys_var = tk.BooleanVar(value=self._get_global_hotkeys_enabled())
-        m_live.add_checkbutton(
-            label="🌐  Hotkeys virker globalt (virker selv hvis OBS er foran)",
-            variable=self._global_hotkeys_var,
-            command=self._toggle_global_hotkeys,
-        )
-        m_live.add_separator()
-        m_live.add_command(
-            label="💡 Tip: tryk F i Stage Mode for at skifte mellem fuldskærm/vindue",
-            state=tk.DISABLED,
         )
         menubar.add_cascade(label="Live", menu=m_live)
 
@@ -1704,8 +1677,6 @@ class SetlistApp:
         self.root.bind("<Control-o>", lambda e: self.load_from())
         self.root.bind("<Control-p>", lambda e: self.export_print())
         self.root.bind("<Control-f>", lambda e: self._focus_search())
-        self.root.bind("<F5>", lambda e: self.open_stage_mode())
-        self.root.bind("<F6>", lambda e: self.open_stage_mode_window())
 
     def _build_top_bar(self) -> None:
         wrap = ttk.Frame(self.root, padding=(8, 6, 8, 2))
@@ -2018,117 +1989,10 @@ class SetlistApp:
         start_idx = sel[0] if sel else 0
         # Gem inden vi går i scenelyset (for en sikkerheds skyld)
         self.model.autosave()
-        # Hent brugerens custom hotkeys (eller defaults hvis ingen er gemt)
-        try:
-            from hotkeys import KeyBindings
-            bindings = KeyBindings.load()
-        except Exception:  # noqa: BLE001
-            bindings = None
         self._active_stage_mode = StageMode(
             self.root, self.model,
             start_index=start_idx, mode=mode,
-            key_bindings=bindings,
         )
-
-    def open_hotkeys_dialog(self) -> None:
-        """Åbn dialog til at konfigurere Stage Mode hotkeys.
-
-        Hvis Stage Mode allerede er åben, opdaterer den øjeblikkeligt
-        med de nye bindings via rebind_keys()-callback.
-        """
-        try:
-            from hotkeys import KeyBindings
-            from hotkeys_dialog import HotkeysDialog
-        except ImportError as e:
-            messagebox.showerror(
-                "Fejl",
-                f"Kunne ikke åbne hotkey-dialogen: {e}",
-                parent=self.root,
-            )
-            return
-
-        current = KeyBindings.load()
-
-        # Hvis Stage Mode er åben — opdatér live
-        def on_apply(new_bindings):
-            sm = getattr(self, "_active_stage_mode", None)
-            if sm is not None:
-                try:
-                    if sm.winfo_exists():
-                        sm.rebind_keys(new_bindings)
-                except tk.TclError:
-                    pass
-
-        HotkeysDialog(self.root, bindings=current, on_apply=on_apply)
-
-    # ------------------------------------------------------------------
-    #  Globale hotkeys — virker selv hvis OBS/anden app har focus
-    # ------------------------------------------------------------------
-    def _get_global_hotkeys_enabled(self) -> bool:
-        """Læs nuværende setting (med pænt fallback hvis modul mangler)."""
-        try:
-            import global_hotkeys
-            return global_hotkeys.is_enabled()
-        except Exception:  # noqa: BLE001
-            return False
-
-    def _toggle_global_hotkeys(self) -> None:
-        """Brugeren klikkede på menu-toggle. Gem valg + opdater Stage Mode."""
-        try:
-            import global_hotkeys
-        except ImportError:
-            messagebox.showerror(
-                "Modul mangler",
-                "Kunne ikke loade global_hotkeys-modulet.",
-                parent=self.root,
-            )
-            self._global_hotkeys_var.set(False)
-            return
-
-        wanted = self._global_hotkeys_var.get()
-
-        if wanted and not global_hotkeys.GlobalHotkeys.is_supported():
-            # Brugeren prøver at slå det til, men platformen kan ikke
-            reason = global_hotkeys.GlobalHotkeys.get_unsupported_reason()
-            messagebox.showwarning(
-                "Globale hotkeys ikke understøttet",
-                reason or "Globale hotkeys virker ikke på denne platform.",
-                parent=self.root,
-            )
-            self._global_hotkeys_var.set(False)
-            return
-
-        # Gem og giv lille bekræftelse
-        global_hotkeys.set_enabled(wanted)
-
-        if wanted:
-            messagebox.showinfo(
-                "Globale hotkeys aktiveret",
-                "Hotkeys virker nu globalt — også når OBS/vMix eller andre "
-                "apps har keyboard-focus.\n\n"
-                "Træder i kraft næste gang du åbner Stage Mode.\n\n"
-                "💡 Bemærk: piletaster og mellemrum vil også styre Setlist "
-                "Manager når du fx skriver i andre programmer. Slå fra hvis "
-                "det generer.",
-                parent=self.root,
-            )
-        else:
-            messagebox.showinfo(
-                "Globale hotkeys slået fra",
-                "Hotkeys virker nu kun når Stage Mode-vinduet har "
-                "keyboard-focus (standard).",
-                parent=self.root,
-            )
-
-        # Hvis Stage Mode er åben lige nu — opdater live
-        sm = getattr(self, "_active_stage_mode", None)
-        if sm is not None:
-            try:
-                if sm.winfo_exists():
-                    # Rebind med samme bindings — _bind_keys håndterer globals
-                    sm.rebind_keys(sm.key_bindings)
-            except tk.TclError:
-                pass
 
     # ------------------------------------------------------------------
     #  NDI broadcast (til OBS/vMix/ATEM)
@@ -2242,7 +2106,11 @@ class SetlistApp:
             return
 
         if not ndi_output.is_available():
-            self.show_ndi_help()
+            messagebox.showerror(
+                "NDI ikke tilgængelig",
+                ndi_output.get_install_help(),
+                parent=self.root,
+            )
             return
 
         songs = self.model.current_setlist.get("songs", [])
@@ -2303,7 +2171,11 @@ class SetlistApp:
             return
 
         if not ndi_output.is_available():
-            self.show_ndi_help()
+            messagebox.showerror(
+                "NDI ikke tilgængelig",
+                ndi_output.get_install_help(),
+                parent=self.root,
+            )
             return
 
         # Tjek for Pillow ImageGrab
@@ -2333,16 +2205,9 @@ class SetlistApp:
         start_idx = sel[0] if sel else 0
         self.model.autosave()
 
-        try:
-            from hotkeys import KeyBindings
-            bindings = KeyBindings.load()
-        except Exception:  # noqa: BLE001
-            bindings = None
-
         sm = StageMode(
             self.root, self.model,
             start_index=start_idx, mode="window",
-            key_bindings=bindings,
         )
         self._active_stage_mode = sm
 
@@ -2501,27 +2366,24 @@ class SetlistApp:
             import webbrowser
             webbrowser.open(urls[0])
 
-    def start_web_server(self) -> None:
-        """Start web-serveren så bandet kan se setlisten på deres telefoner."""
+    def _auto_start_web_server(self) -> None:
+        """Start web-serveren stille i baggrunden så snart appen åbnes.
+
+        Kører altid — bandet/Stream Deck behøver bare at vide URL'en.
+        Hvis port 8765 er optaget falder vi automatisk tilbage til 8766/8767.
+        Stille fejl: hvis intet virker er det ikke fatalt — Stage Mode
+        og NDI fungerer stadig.
+        """
         ws = self._ensure_web_server()
         if ws.is_running():
-            self.show_web_urls()
             return
-        ok = ws.start()
-        if not ok:
-            messagebox.showerror(
-                "Kunne ikke starte web-server",
-                "Porten er måske allerede i brug af et andet program.\n"
-                "Prøv at lukke andre apps der bruger HTTP-porten 8765.",
-                parent=self.root,
-            )
-            return
-        # Send initial state baseret på valgt sang
-        ws.set_current_index(self._current_song_idx())
-        # Start periodisk client-count refresh
-        self._schedule_web_status_refresh()
-        # Vis URL'er + lille hjælpsom dialog
-        self.show_web_urls(first_time=True)
+        try:
+            ok = ws.start()
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            ws.set_current_index(self._current_song_idx())
+            self._schedule_web_status_refresh()
 
     def _schedule_web_status_refresh(self) -> None:
         """Opdatér client-count i topbaren hver 2 sek så det viser realtid."""
@@ -2532,42 +2394,29 @@ class SetlistApp:
             except tk.TclError:
                 pass  # root er ved at lukke
 
-    def stop_web_server(self) -> None:
-        """Stop web-serveren."""
-        if self._web_server is None or not self._web_server.is_running():
-            messagebox.showinfo(
+    def show_web_urls(self) -> None:
+        """Vis dialog med URL'er bandet + Stream Deck kan tilgå."""
+        ws = self._web_server
+        if ws is None or not ws.is_running():
+            messagebox.showwarning(
                 "Web-server kører ikke",
-                "Der er ingen web-server at stoppe.",
+                "Web-serveren kunne ikke startes (måske er port 8765 optaget).\n"
+                "Genstart appen og prøv igen.",
                 parent=self.root,
             )
             return
-        self._web_server.stop()
-
-    def show_web_urls(self, first_time: bool = False) -> None:
-        """Vis dialog med URL'er bandet kan tilgå."""
-        if self._web_server is None or not self._web_server.is_running():
-            messagebox.showinfo(
-                "Web-server ikke aktiv",
-                "Start web-visningen først via Live → Start web-visning.",
-                parent=self.root,
-            )
-            return
-        urls = self._web_server.get_urls()
+        urls = ws.get_urls()
         url_text = "\n".join(f"   {u}" for u in urls)
         # Find primær LAN-URL (den bandet/Stream Deck skal bruge)
         primary = next((u for u in urls if not u.startswith("http://localhost")), urls[0])
-        intro = (
-            "Web-visningen kører nu! 🎉\n\n"
-            if first_time else
-            "Web-visningen kører på følgende adresser:\n\n"
-        )
         body = (
-            f"{intro}{url_text}\n\n"
-            "📱 Bandet skal være på SAMME WiFi-netværk som denne PC.\n"
-            "   Åbn én af adresserne i deres browser og vælg visning:\n"
+            f"Web-serveren kører altid mens appen er åben — bandet og Stream "
+            f"Deck kan bruge disse adresser:\n\n{url_text}\n\n"
+            "📱 BANDETS TELEFONER (samme WiFi-netværk):\n"
+            "   Åbn én af adresserne i browseren og vælg visning:\n"
             "   • 📋 Kun setliste — rene sangtitler\n"
             "   • 📝 Med noter — sang + noter (som NDI)\n\n"
-            "🎛 Stream Deck / Bitfocus Companion:\n"
+            "🎛 STREAM DECK / BITFOCUS COMPANION:\n"
             "   Brug 'Generic HTTP'-modul → 'GET request' med disse URL'er:\n"
             f"   • Næste sang:    {primary}/api/next\n"
             f"   • Forrige sang:  {primary}/api/prev\n"
@@ -2575,38 +2424,7 @@ class SetlistApp:
             f"   • Vis aktuel:    {primary}/api/current  (JSON til feedback)\n\n"
             "Siden + NDI + listbox opdaterer sig automatisk når du skifter."
         )
-        messagebox.showinfo("🌐 Web-visning + 🎛 Stream Deck", body, parent=self.root)
-
-    def show_ndi_help(self) -> None:
-        """Vis dialog med info om hvad NDI er + hvordan man bruger det."""
-        try:
-            import ndi_output
-        except ImportError as e:
-            help_text = (
-                f"NDI-modulet kunne ikke loades: {e}\n\n"
-                f"Dette burde ikke ske hvis du har installeret via vores "
-                f"installer — prøv at geninstallere appen."
-            )
-        else:
-            if ndi_output.is_available():
-                help_text = (
-                    "✅ NDI er klar til brug — bundlet med Setlist Manager!\n\n"
-                    "Sådan bruger du det i OBS/vMix:\n\n"
-                    "1. Klik 'Live → 🎙 NDI Noter' (eller 'Send Stage Mode')\n"
-                    "2. I OBS: installer 'OBS NDI plugin' fra\n"
-                    "   https://github.com/obs-ndi/obs-ndi/releases\n"
-                    "3. I OBS: + Tilføj kilde → NDI Source\n"
-                    "4. Vælg 'Setlist Manager Notes' (eller 'Stage')\n"
-                    "5. 🔴 LIVE!\n\n"
-                    "I vMix: Tilføj → NDI/Desktop Capture → vælg navnet.\n\n"
-                    "Tip: NDI sender over LAN — Setlist Manager og OBS\n"
-                    "behøver IKKE være på samme computer. De skal bare\n"
-                    "være på samme netværk."
-                )
-            else:
-                help_text = ndi_output.get_install_help()
-
-        messagebox.showinfo("NDI — broadcast til OBS/vMix", help_text, parent=self.root)
+        messagebox.showinfo("🌐 Web-adresser + 🎛 Stream Deck", body, parent=self.root)
 
     def _focus_search(self) -> None:
         self.lib_search_entry.focus_set()

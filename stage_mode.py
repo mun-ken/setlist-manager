@@ -116,7 +116,6 @@ class StageMode(tk.Toplevel):
         model: SetlistModel,
         start_index: int = 0,
         mode: str = "fullscreen",
-        key_bindings=None,
     ) -> None:
         """Åbn Stage Mode.
 
@@ -132,9 +131,6 @@ class StageMode(tk.Toplevel):
             "fullscreen" (default) eller "window".
             I window-mode åbnes et resizable vindue på 1280x800 i stedet
             for at tage hele skærmen.
-        key_bindings : KeyBindings, optional
-            Brugerens custom hotkey-mapping. Hvis None: indlæses fra disk
-            (eller bruger defaults hvis ingen er gemt).
         """
         super().__init__(parent)
         self.parent = parent
@@ -142,18 +138,6 @@ class StageMode(tk.Toplevel):
         self.mode = mode
         self._is_fullscreen = False  # bliver evt. overskrevet i _setup_window_mode
         self.title("Setlist Manager — Stage Mode")
-
-        # Indlæs hotkeys hvis ikke given
-        if key_bindings is None:
-            try:
-                from hotkeys import KeyBindings
-                key_bindings = KeyBindings.load()
-            except Exception:  # noqa: BLE001
-                # Fallback til hardcoded defaults hvis hotkeys-modulet
-                # ikke kan loades (skal aldrig ske, men safer than sorry)
-                from hotkeys import KeyBindings
-                key_bindings = KeyBindings()
-        self.key_bindings = key_bindings
 
         # Snapshot af setlisten (vi rører ikke modellen herfra)
         self.items: List = list(model.current_setlist.get("songs", []))
@@ -271,32 +255,20 @@ class StageMode(tk.Toplevel):
         return max(2, int(base * self._scale()))
 
     # ------------------------------------------------------------------
-    #  Hint-tekst i top-baren (viser brugerens egne hotkeys)
+    #  Hint-tekst i top-baren
     # ------------------------------------------------------------------
     def _build_hint_text(self) -> str:
-        """Bygger en kompakt hint-streng der viser brugerens egne hotkeys.
+        """Returnér kompakt hint-tekst der viser tasterne i Stage Mode.
 
-        Vi tager kun den FØRSTE binding for hver vigtig handling for at
-        holde linjen kort — fuld liste ses i Live → Tilpas hotkeys.
+        Tasterne er fast hardcoded — Stream Deck/Companion kan også styre
+        appen via web-API'et (se Live → Vis web-adresser).
         """
-        try:
-            from hotkeys import format_key
-        except ImportError:
-            return "Esc=luk · Klik=næste · Højre-klik=forrige"
-
-        def first_key(action_id: str, fallback: str = "") -> str:
-            keys = self.key_bindings.get_keys(action_id)
-            return format_key(keys[0]) if keys else fallback
-
-        close_key = first_key("close", "Esc")
-        next_key = first_key("next_song", "Mellemrum")
-        prev_key = first_key("prev_song", "← Venstre")
-        fs_key = first_key("toggle_fullscreen", "F")
         return (
-            f"{close_key}=luk · "
-            f"Klik/{next_key}=næste · "
-            f"Højre-klik/{prev_key}=forrige · "
-            f"{fs_key}=fullscreen"
+            "Esc=luk · "
+            "Klik/→/Mellemrum=næste · "
+            "Højre-klik/←=forrige · "
+            "F=fullscreen · "
+            "1-9=hop"
         )
 
     # ------------------------------------------------------------------
@@ -774,126 +746,37 @@ class StageMode(tk.Toplevel):
                     return
 
     # ------------------------------------------------------------------
-    #  Key bindings
+    #  Key bindings — hardcoded standard taster
     # ------------------------------------------------------------------
     def _bind_keys(self) -> None:
-        """Bind tastatur-genveje fra self.key_bindings.
+        """Bind faste tastatur-genveje + museknapper.
 
-        Brugeren kan customize disse via Live → Tilpas hotkeys-menuen.
-        Jump til sang 1-9 og museknapper er hardcoded (de er ikke i
-        ACTIONS-registeret fordi det ville gøre konfigurations-UI'et
-        unødigt komplekst).
-
-        Hvis brugeren har slået GLOBALE hotkeys til (Live → menu) registrerer
-        vi også samme bindings system-wide via keyboard-library — så pile-
-        tasterne virker selvom OBS/vMix har focus.
+        Tasterne er IKKE konfigurerbare længere — Stream Deck/Companion
+        styrer normalt sangskift via web-API'et. Disse er bare en backup
+        så Stage Mode også virker uden Stream Deck.
         """
-        # Map fra action_id → metode der skal kaldes
-        action_handlers = {
-            "next_song": self.next_song,
-            "prev_song": self.prev_song,
-            "first_song": self.go_to_first,
-            "last_song": self.go_to_last,
-            "toggle_fullscreen": self._toggle_fullscreen,
-            "close": self.close,
-        }
-
-        for action_id, handler in action_handlers.items():
-            keys = self.key_bindings.get_keys(action_id)
-            for k in keys:
-                try:
-                    self.bind(k, handler)
-                except tk.TclError:
-                    # Ugyldig binding-streng — ignorer pænt
-                    pass
-
-        # Hop til sang 1-9 (hardcoded, ikke konfigurerbar)
+        # Navigation
+        self.bind("<Right>", self.next_song)
+        self.bind("<space>", self.next_song)
+        self.bind("<Down>", self.next_song)
+        self.bind("<Left>", self.prev_song)
+        self.bind("<Up>", self.prev_song)
+        self.bind("<Home>", self.go_to_first)
+        self.bind("<End>", self.go_to_last)
+        # Fullscreen toggle (både F og f)
+        self.bind("<f>", self._toggle_fullscreen)
+        self.bind("<F>", self._toggle_fullscreen)
+        # Luk Stage Mode
+        self.bind("<Escape>", self.close)
+        # Hop til sang 1-9 (tast nummer-tasten direkte)
         for n in range(1, 10):
             self.bind(str(n), lambda e, num=n: self.go_to_song_number(num))
-        # Museknapper (hardcoded — left=næste, right/middle=forrige)
+        # Museknapper (left=næste, right/middle=forrige)
         self.bind("<Button-1>", self.next_song)
         self.bind("<Button-3>", self.prev_song)
         self.bind("<Button-2>", self.prev_song)  # mac middle-click
         # Cursor reveal ved mouse motion
         self.bind("<Motion>", lambda e: self._show_cursor_briefly())
-
-        # === GLOBALE hotkeys (virker selv hvis OBS har focus) ===
-        self._setup_global_hotkeys(action_handlers)
-
-    def _setup_global_hotkeys(self, action_handlers: dict) -> None:
-        """Registrer globale hotkeys hvis brugeren har slået dem til.
-
-        Kaldes fra _bind_keys() — separat metode så vi kan rebind nemt.
-        """
-        # Ryd evt. tidligere registrerede globals først
-        self._teardown_global_hotkeys()
-
-        try:
-            import global_hotkeys as gh
-        except ImportError:
-            return  # modulet kan ikke loades — skip pænt
-
-        if not gh.is_enabled():
-            return  # brugeren har ikke slået det til
-
-        if not gh.GlobalHotkeys.is_supported():
-            # Tavs fallback — vis ikke fejl her, det er allerede vist
-            # når brugeren prøvede at slå det til i menuen
-            return
-
-        self._global_hotkeys = gh.GlobalHotkeys(self)
-
-        # Konverter Tk-bindings til keyboard-library format og registrer
-        for action_id, handler in action_handlers.items():
-            for tk_binding in self.key_bindings.get_keys(action_id):
-                kb_hotkey = gh.tk_binding_to_keyboard(tk_binding)
-                if kb_hotkey:
-                    # Wrap handler så det matcher signaturen (callback uden event)
-                    self._global_hotkeys.register(
-                        kb_hotkey,
-                        lambda h=handler: h(),
-                    )
-
-    def _teardown_global_hotkeys(self) -> None:
-        """Fjern alle globale hotkeys — kald ved close eller rebind."""
-        gh_instance = getattr(self, "_global_hotkeys", None)
-        if gh_instance is not None:
-            try:
-                gh_instance.unregister_all()
-            except Exception:  # noqa: BLE001
-                pass
-            self._global_hotkeys = None
-
-    def rebind_keys(self, key_bindings) -> None:
-        """Skift binding live (hvis brugeren åbner config-dialogen og ændrer).
-
-        Unbinder de gamle keys og binder de nye. Sikrer at Stage Mode
-        reagerer øjeblikkeligt på ændringer uden at skulle lukke/genåbne.
-        """
-        # Unbind gamle bindings
-        old_handlers = {
-            "next_song": self.next_song,
-            "prev_song": self.prev_song,
-            "first_song": self.go_to_first,
-            "last_song": self.go_to_last,
-            "toggle_fullscreen": self._toggle_fullscreen,
-            "close": self.close,
-        }
-        for action_id in old_handlers:
-            for k in self.key_bindings.get_keys(action_id):
-                try:
-                    self.unbind(k)
-                except tk.TclError:
-                    pass
-
-        # Sæt nye + rebind
-        self.key_bindings = key_bindings
-        self._bind_keys()
-        # Opdater hint-baren med de nye tast-navne
-        try:
-            self.hint_label.configure(text=self._build_hint_text())
-        except (tk.TclError, AttributeError):
-            pass
 
     def _toggle_fullscreen(self, _event=None) -> None:
         """Skift mellem fullscreen og vindue.
@@ -926,8 +809,6 @@ class StageMode(tk.Toplevel):
 
     def close(self, _event=None) -> None:
         self._stop_cursor_timer()
-        # Fjern globale hotkeys så de ikke blokerer keyboardet for andre apps
-        self._teardown_global_hotkeys()
         try:
             self.attributes("-fullscreen", False)
         except tk.TclError:
