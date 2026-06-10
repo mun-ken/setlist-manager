@@ -7,7 +7,10 @@ Schema v3 (current)
   "bands": [
     {
       "name": str,
-      "library": [{"name", "key", "duration", "notes"}, ...],
+      "library": [{
+          "name", "key", "duration",
+          "notes_sound", "notes_lights", "notes_video", "notes_band"
+      }, ...],
       "setlists": [{"name", "songs": [str, ...], "modified_at": ISO-string}, ...],
       "active_setlist": int
     }, ...
@@ -15,7 +18,11 @@ Schema v3 (current)
   "active_band": int,
   "print_options": {
     "show_number": bool, "show_key": bool, "show_duration": bool,
-    "show_notes": bool, "show_total_time": bool
+    "show_notes": bool, "show_total_time": bool,
+    "show_notes_sound": bool, "show_notes_lights": bool,
+    "show_notes_video": bool, "show_notes_band": bool,
+    "view_notes_sound": bool, "view_notes_lights": bool,
+    "view_notes_video": bool, "view_notes_band": bool
   }
 }
 
@@ -24,6 +31,10 @@ Schema v2 (auto-migrated): {schema_version: 2, library, setlists, active_setlist
 
 Schema v1 (auto-migrated): {library: [str], setlist: [str]}
   → migreres til ét band med én setliste.
+
+Noter-migration (v1.7.0): Tidligere havde sange ét enkelt "notes"-felt.
+Nu har de 4 kategorier: lyd, lys, video, band. Gamle notes flyttes
+til "notes_band" så de ikke går tabt (band-noter er det mest generelle).
 """
 
 from __future__ import annotations
@@ -32,9 +43,83 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 SCHEMA_VERSION = 3
+
+
+# ---------------------------------------------------------------------------
+# Note-kategorier — 4 separate noter pr. sang
+# ---------------------------------------------------------------------------
+# Key i song-dict → (emoji, dansk label, kort label)
+NOTE_CATEGORIES: List[Tuple[str, str, str, str]] = [
+    # (field_key,        emoji,  full_label, short_label)
+    ("notes_sound",      "🔊",   "Lyd",      "Lyd"),
+    ("notes_lights",     "💡",   "Lys",      "Lys"),
+    ("notes_video",      "🎬",   "Video",    "Video"),
+    ("notes_band",       "🎸",   "Band",     "Band"),
+]
+
+# Bare keys — bruges mange steder
+NOTE_FIELDS: List[str] = [k for k, _, _, _ in NOTE_CATEGORIES]
+
+
+def get_note_label(field_key: str, *, with_emoji: bool = True) -> str:
+    """Returnerer label for et notes-felt (fx '🔊 Lyd' eller 'Lyd')."""
+    for k, emoji, label, _ in NOTE_CATEGORIES:
+        if k == field_key:
+            return f"{emoji} {label}" if with_emoji else label
+    return field_key
+
+
+def iter_song_notes(
+    song: Dict,
+    *,
+    only: Optional[Iterable[str]] = None,
+    with_emoji: bool = True,
+) -> List[Tuple[str, str, str]]:
+    """Hent ikke-tomme noter fra en sang i kategori-rækkefølge.
+
+    Returnerer liste af (field_key, label, text) — én pr. kategori der har
+    indhold. `only` kan begrænse til specifikke felter (fx kun aktiverede
+    kategorier fra brugerens toggle-valg).
+    """
+    allow = set(only) if only is not None else None
+    out: List[Tuple[str, str, str]] = []
+    for field_key, emoji, full_label, _ in NOTE_CATEGORIES:
+        if allow is not None and field_key not in allow:
+            continue
+        text = (song.get(field_key) or "").strip()
+        if not text:
+            continue
+        label = f"{emoji} {full_label}" if with_emoji else full_label
+        out.append((field_key, label, text))
+    return out
+
+
+def combine_song_notes(
+    song: Dict,
+    *,
+    only: Optional[Iterable[str]] = None,
+    separator: str = "  ·  ",
+    include_labels: bool = True,
+) -> str:
+    """Lav én streng af alle valgte noter — fx til søgning eller stage-mode.
+
+    Tom string hvis sangen ingen noter har i de valgte kategorier.
+    """
+    parts: List[str] = []
+    for _, label, text in iter_song_notes(song, only=only, with_emoji=include_labels):
+        if include_labels:
+            parts.append(f"{label}: {text}")
+        else:
+            parts.append(text)
+    return separator.join(parts)
+
+
+def song_has_any_notes(song: Dict, *, only: Optional[Iterable[str]] = None) -> bool:
+    """True hvis sangen har noter i mindst én af de valgte kategorier."""
+    return bool(iter_song_notes(song, only=only))
 
 
 # ---------------------------------------------------------------------------
@@ -54,12 +139,41 @@ def default_autosave_path() -> Path:
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
-def new_song(name, duration="", key="", notes="") -> Dict:
+def new_song(
+    name,
+    duration: str = "",
+    key: str = "",
+    notes: str = "",
+    *,
+    notes_sound: str = "",
+    notes_lights: str = "",
+    notes_video: str = "",
+    notes_band: str = "",
+) -> Dict:
+    """Lav en ny sang-dict med 4 separate note-kategorier.
+
+    Bagudkompatibilitet: hvis `notes` (positionel) er angivet og ingen af de
+    nye keyword-felter er sat, lægges `notes` i `notes_band` (mest oplagt for
+    band-noter — capo, struktur, dynamik, etc.).
+    """
+    legacy_notes = (notes or "").strip()
+    sound = (notes_sound or "").strip()
+    lights = (notes_lights or "").strip()
+    video = (notes_video or "").strip()
+    band = (notes_band or "").strip()
+
+    # Hvis kun det gamle `notes` er givet → læg i band-noter
+    if legacy_notes and not (sound or lights or video or band):
+        band = legacy_notes
+
     return {
         "name": (name or "").strip(),
         "key": (key or "").strip(),
         "duration": (duration or "").strip(),
-        "notes": (notes or "").strip(),
+        "notes_sound": sound,
+        "notes_lights": lights,
+        "notes_video": video,
+        "notes_band": band,
     }
 
 
@@ -127,7 +241,18 @@ def default_print_options() -> Dict:
         "show_number": True,
         "show_key": True,
         "show_duration": True,
-        "show_notes": True,
+        "show_notes": True,  # master toggle: skjuler ALLE noter på print
+        # Hvilke kategorier af noter skal med på print (default: kun band)
+        "show_notes_sound": False,
+        "show_notes_lights": False,
+        "show_notes_video": False,
+        "show_notes_band": True,
+        # Hvilke kategorier vises i hovedvinduets setlist-view
+        # (gemmes så valg overlever app-genstart)
+        "view_notes_sound": True,
+        "view_notes_lights": True,
+        "view_notes_video": True,
+        "view_notes_band": True,
         # Footer + sektioner
         "show_total_time": True,
         "show_markers": True,
@@ -317,14 +442,48 @@ class SetlistModel:
                 return s
         return None
 
-    def add_song(self, name, duration="", key="", notes="") -> bool:
+    def add_song(
+        self,
+        name,
+        duration: str = "",
+        key: str = "",
+        notes: str = "",
+        *,
+        notes_sound: str = "",
+        notes_lights: str = "",
+        notes_video: str = "",
+        notes_band: str = "",
+    ) -> bool:
         name = (name or "").strip()
         if not name or self.get_song(name) is not None:
             return False
-        self.library.append(new_song(name, duration, key, notes))
+        self.library.append(new_song(
+            name, duration, key, notes,
+            notes_sound=notes_sound,
+            notes_lights=notes_lights,
+            notes_video=notes_video,
+            notes_band=notes_band,
+        ))
         return True
 
-    def update_song(self, original_name, name, duration, key, notes) -> bool:
+    def update_song(
+        self,
+        original_name,
+        name,
+        duration,
+        key,
+        notes: str = "",
+        *,
+        notes_sound: Optional[str] = None,
+        notes_lights: Optional[str] = None,
+        notes_video: Optional[str] = None,
+        notes_band: Optional[str] = None,
+    ) -> bool:
+        """Opdater sang. Hvis et notes_*-keyword er None bruges eksisterende værdi.
+
+        Hvis kun det legacy `notes`-argument er givet (og alle keyword er None),
+        går teksten i `notes_band` for bagudkompatibilitet.
+        """
         song = self.get_song(original_name)
         if song is None:
             return False
@@ -336,7 +495,25 @@ class SetlistModel:
         song["name"] = new_name
         song["key"] = (key or "").strip()
         song["duration"] = (duration or "").strip()
-        song["notes"] = (notes or "").strip()
+
+        # Hvis alle 4 keyword er None og legacy `notes` er givet → læg i band
+        all_kw_none = all(
+            v is None for v in (notes_sound, notes_lights, notes_video, notes_band)
+        )
+        if all_kw_none and notes:
+            song["notes_band"] = (notes or "").strip()
+            # ryd de andre? Nej — så ville eksisterende noter forsvinde ved
+            # legacy-kald. Vi opdaterer KUN band og lader resten stå.
+        else:
+            if notes_sound is not None:
+                song["notes_sound"] = (notes_sound or "").strip()
+            if notes_lights is not None:
+                song["notes_lights"] = (notes_lights or "").strip()
+            if notes_video is not None:
+                song["notes_video"] = (notes_video or "").strip()
+            if notes_band is not None:
+                song["notes_band"] = (notes_band or "").strip()
+
         if new_name != original_name:
             for sl_idx, sl in enumerate(self.setlists):
                 if any(n == original_name for n in sl["songs"] if isinstance(n, str)):
@@ -569,7 +746,9 @@ class SetlistModel:
 
     @staticmethod
     def _song_matches(song: Dict, q: str) -> bool:
-        for field in ("name", "key", "notes"):
+        # Søg i alle 4 noter-kategorier + navn + toneart
+        fields = ["name", "key"] + NOTE_FIELDS
+        for field in fields:
             value = (song.get(field) or "").lower()
             if q in value:
                 return True
@@ -588,7 +767,10 @@ class SetlistModel:
             s.get("name", ""),
             s.get("duration", ""),
             s.get("key", ""),
-            s.get("notes", ""),
+            notes_sound=s.get("notes_sound", ""),
+            notes_lights=s.get("notes_lights", ""),
+            notes_video=s.get("notes_video", ""),
+            notes_band=s.get("notes_band", "") or s.get("notes", ""),
         )
 
     # ------------------------------------------------------------------
@@ -708,11 +890,24 @@ class SetlistModel:
         if isinstance(s, str):
             return new_song(s)
         if isinstance(s, dict):
+            # Migration: gamle filer havde kun ét `notes`-felt.
+            # Hvis ingen af de nye notes_*-felter er sat, men `notes` er,
+            # flyttes den gamle tekst til `notes_band`.
+            legacy_notes = (s.get("notes") or "").strip()
+            sound = (s.get("notes_sound") or "").strip()
+            lights = (s.get("notes_lights") or "").strip()
+            video = (s.get("notes_video") or "").strip()
+            band = (s.get("notes_band") or "").strip()
+            if legacy_notes and not (sound or lights or video or band):
+                band = legacy_notes
             return new_song(
                 s.get("name", ""),
                 s.get("duration", ""),
                 s.get("key", ""),
-                s.get("notes", ""),
+                notes_sound=sound,
+                notes_lights=lights,
+                notes_video=video,
+                notes_band=band,
             )
         return new_song(str(s))
 
@@ -784,6 +979,17 @@ class SetlistModel:
         logo = self.get_band_logo() if opts.get("show_logo", True) else ""
         safe_title = (title or sl["name"] or f"Setliste {datetime.now().date()}").strip()
 
+        # ---- Hvilke noter-kategorier skal med på print ----
+        # `show_notes` er master-toggle. Hvis den er slået fra → ingen noter.
+        # Ellers kun de kategorier hvor show_notes_<kategori> er True.
+        active_note_cats: List[str] = []
+        if opts.get("show_notes", True):
+            for field_key in NOTE_FIELDS:
+                opt_key = f"show_{field_key}"
+                if opts.get(opt_key, field_key == "notes_band"):
+                    active_note_cats.append(field_key)
+        show_notes_col = bool(active_note_cats)
+
         # ---- Kolonner ----
         col_specs: List[Tuple[str, str, str]] = []  # (id, label, width)
         if opts["show_number"]:
@@ -793,7 +999,7 @@ class SetlistModel:
             col_specs.append(("key", "Toneart", "12%"))
         if opts["show_duration"]:
             col_specs.append(("dur", "Længde", "12%"))
-        if opts["show_notes"]:
+        if show_notes_col:
             col_specs.append(("notes", "Noter", "32%"))
 
         used_pct = sum(
@@ -851,7 +1057,16 @@ class SetlistModel:
                 elif cid == "dur":
                     cells.append(f"<td class='c-dur'>{_html_escape(song['duration'])}</td>")
                 elif cid == "notes":
-                    cells.append(f"<td class='c-notes'>{_html_escape(song['notes'])}</td>")
+                    # Render hver aktiv kategori som lille blok med label
+                    note_blocks: List[str] = []
+                    for _, label, text in iter_song_notes(song, only=active_note_cats):
+                        note_blocks.append(
+                            f"<div class='note-block'>"
+                            f"<span class='note-label'>{_html_escape(label)}</span>"
+                            f"<span class='note-text'>{_html_escape(text)}</span>"
+                            f"</div>"
+                        )
+                    cells.append(f"<td class='c-notes'>{''.join(note_blocks)}</td>")
             rows_html.append("<tr>" + "".join(cells) + "</tr>")
 
         # ---- Footer ----
@@ -915,6 +1130,11 @@ class SetlistModel:
         .c-num {{ color: #888; }}
         .c-song {{ font-weight: bold; }}
         .c-notes {{ color: #333; font-size: {sizes['notes']}pt; }}
+        .note-block {{ display: block; margin-bottom: 3pt; line-height: 1.25; }}
+        .note-block:last-child {{ margin-bottom: 0; }}
+        .note-label {{ display: inline-block; font-weight: bold; color: #555;
+                      margin-right: 6pt; min-width: 56pt; }}
+        .note-text {{ color: #222; white-space: pre-wrap; }}
         .total {{ margin-top: 14pt; font-size: {sizes['total']}pt; color: #333; }}
         .marker-row td.marker {{
             background: #fff7d6;

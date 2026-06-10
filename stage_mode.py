@@ -33,6 +33,7 @@ from setlist_model import (
     is_marker_item,
     item_marker_label,
     item_song_name,
+    iter_song_notes,
     new_song,
 )
 
@@ -573,11 +574,18 @@ class StageMode(tk.Toplevel):
             return
         name = item_song_name(item)
         song = self.model.get_song(name) or new_song(name)
-        notes = (song.get("notes") or "").strip()
-        if notes:
-            # Erstat newlines med ' · ' for at lave det til én linje på scenen
-            one_line = notes.replace("\n", "   ·   ")
-            self.notes_var.set(f"�  {one_line}")
+
+        # Saml alle 4 noter-kategorier til én linje med emoji-prefix.
+        # Hver kategori (lyd, lys, video, band) får kun sin emoji + tekst
+        # for at spare plads på scenen.
+        parts: list[str] = []
+        for _, label, text in iter_song_notes(song, with_emoji=True):
+            emoji = label.split(" ", 1)[0]
+            one_line = text.replace("\n", " · ")
+            parts.append(f"{emoji} {one_line}")
+
+        if parts:
+            self.notes_var.set("    ".join(parts))
             self._show_notes_banner()
         else:
             self._hide_notes_banner()

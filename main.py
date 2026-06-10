@@ -27,15 +27,21 @@ except ImportError:
 import music_search
 from setlist_model import (
     FONT_SIZES_PT,
+    NOTE_CATEGORIES,
+    NOTE_FIELDS,
     SetlistModel,
+    combine_song_notes,
     default_autosave_path,
     default_print_options,
     format_modified_at,
     format_seconds,
+    get_note_label,
     is_marker_item,
     item_marker_label,
     item_song_name,
+    iter_song_notes,
     new_song,
+    song_has_any_notes,
 )
 from stage_mode import StageMode
 import theme
@@ -65,6 +71,8 @@ def _center_on(window: tk.Toplevel, parent: tk.Misc) -> None:
 # Tilføj/Rediger sang
 # ---------------------------------------------------------------------------
 class SongDialog(tk.Toplevel):
+    """Sang-dialog med 4 separate noter-felter: lyd, lys, video, band."""
+
     def __init__(self, parent, title: str = "Sang", initial: dict | None = None) -> None:
         super().__init__(parent)
         self.title(title)
@@ -95,18 +103,63 @@ class SongDialog(tk.Toplevel):
                 entry.focus_set()
                 entry.select_range(0, tk.END)
 
-        ttk.Label(frm, text="Noter:").grid(row=len(rows), column=0, sticky=tk.NW, pady=4)
-        self._notes = tk.Text(frm, width=36, height=4, wrap=tk.WORD)
-        theme.style_text(self._notes)
-        self._notes.insert("1.0", initial.get("notes", ""))
-        self._notes.grid(row=len(rows), column=1, sticky=tk.W + tk.E, pady=4, padx=(8, 0))
+        # --- 4 noter-felter: lyd, lys, video, band ---
+        notes_header = ttk.Label(
+            frm, text="Noter pr. afdeling:",
+            font=("TkDefaultFont", 10, "bold"),
+        )
+        notes_header.grid(
+            row=len(rows), column=0, columnspan=2,
+            sticky=tk.W, pady=(12, 4),
+        )
+
+        # Backward compat: hvis kun gammelt `notes`-felt findes på initial
+        # (fra et "fald-tilbage"-kald) lægges det i band-noter.
+        legacy_notes = (initial.get("notes") or "").strip()
+        initial_band = (initial.get("notes_band") or "").strip()
+        if legacy_notes and not initial_band and not any(
+            (initial.get(k) or "").strip() for k in NOTE_FIELDS
+        ):
+            initial_band = legacy_notes
+
+        self._notes_widgets: dict[str, tk.Text] = {}
+        notes_initial: dict[str, str] = {
+            "notes_sound": (initial.get("notes_sound") or "").strip(),
+            "notes_lights": (initial.get("notes_lights") or "").strip(),
+            "notes_video": (initial.get("notes_video") or "").strip(),
+            "notes_band": initial_band,
+        }
+
+        # Læg dem 2-på-række (sound+lights, video+band) — bredt layout
+        # men på smalle skærme falder de naturligt under hinanden i grid.
+        base_row = len(rows) + 1
+        for i, (field_key, emoji, full_label, _) in enumerate(NOTE_CATEGORIES):
+            row = base_row + (i // 2) * 2
+            col_lbl = (i % 2) * 2
+            col_txt = col_lbl + 1
+            ttk.Label(frm, text=f"{emoji} {full_label}:").grid(
+                row=row, column=col_lbl, sticky=tk.NW, pady=(6, 0),
+                padx=(0 if col_lbl == 0 else 12, 0),
+            )
+            txt = tk.Text(frm, width=22, height=3, wrap=tk.WORD)
+            theme.style_text(txt)
+            txt.insert("1.0", notes_initial[field_key])
+            txt.grid(
+                row=row + 1, column=col_lbl, columnspan=2,
+                sticky=tk.W + tk.E, pady=(0, 4),
+                padx=(0 if col_lbl == 0 else 12, 0),
+            )
+            self._notes_widgets[field_key] = txt
 
         btns = ttk.Frame(frm)
-        btns.grid(row=len(rows) + 1, column=0, columnspan=2, sticky=tk.E, pady=(10, 0))
+        btns.grid(
+            row=base_row + 5, column=0, columnspan=4,
+            sticky=tk.E, pady=(14, 0),
+        )
         ttk.Button(btns, text="Annullér", command=self.destroy).pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(btns, text="Gem", command=self._ok).pack(side=tk.RIGHT)
 
-        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Control-Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.destroy())
 
         _center_on(self, parent)
@@ -118,11 +171,19 @@ class SongDialog(tk.Toplevel):
         if not name:
             messagebox.showerror("Fejl", "Sangen skal have et navn.", parent=self)
             return
+        notes_values = {
+            key: widget.get("1.0", tk.END).strip()
+            for key, widget in self._notes_widgets.items()
+        }
         self.result = {
             "name": name,
             "key": self._vars["key"].get().strip(),
             "duration": self._vars["duration"].get().strip(),
-            "notes": self._notes.get("1.0", tk.END).strip(),
+            # Behold legacy `notes`-felt som kombineret tekst — bruges aldrig
+            # af modellen mere, men callers der laver csv-export el.lign.
+            # får stadig én streng.
+            "notes": "\n".join(v for v in notes_values.values() if v),
+            **notes_values,
         }
         self.destroy()
 
@@ -185,6 +246,11 @@ class PrintDialog(tk.Toplevel):
             "show_key":          tk.BooleanVar(value=bool(merged.get("show_key", True))),
             "show_duration":     tk.BooleanVar(value=bool(merged.get("show_duration", True))),
             "show_notes":        tk.BooleanVar(value=bool(merged.get("show_notes", True))),
+            # 4 noter-kategorier (kun band default-til på print)
+            "show_notes_sound":  tk.BooleanVar(value=bool(merged.get("show_notes_sound", False))),
+            "show_notes_lights": tk.BooleanVar(value=bool(merged.get("show_notes_lights", False))),
+            "show_notes_video":  tk.BooleanVar(value=bool(merged.get("show_notes_video", False))),
+            "show_notes_band":   tk.BooleanVar(value=bool(merged.get("show_notes_band", True))),
             # Footer + sektioner
             "show_total_time":   tk.BooleanVar(value=bool(merged.get("show_total_time", True))),
             "show_markers":      tk.BooleanVar(value=bool(merged.get("show_markers", True))),
@@ -247,7 +313,13 @@ class PrintDialog(tk.Toplevel):
                 ("show_number",       "Sangnummer (1, 2, 3, …)"),
                 ("show_key",          "Toneart"),
                 ("show_duration",     "Længde pr. sang"),
-                ("show_notes",        "Noter"),
+                ("show_notes",        "Vis noter (master-toggle)"),
+            ]),
+            ("Hvilke noter skal med?", [
+                ("show_notes_sound",  "🔊 Lyd-noter"),
+                ("show_notes_lights", "💡 Lys-noter"),
+                ("show_notes_video",  "🎬 Video-noter"),
+                ("show_notes_band",   "🎸 Band-noter"),
             ]),
             ("Nederst + sektioner", [
                 ("show_total_time", "Samlet spilletid nederst"),
@@ -521,17 +593,27 @@ class PrintDialog(tk.Toplevel):
                     font=font_norm, fg="#555", width=4,
                 ).pack(side=tk.RIGHT, padx=(4, 0))
 
-            # Noter — vises som indrykket linje under sangen (kun hvis
-            # show_notes er slået til OG sangen rent faktisk har noter).
-            if opts.get("show_notes", True) and song.get("notes"):
-                indent = 3 + 6 if opts["show_number"] else 0
-                notes_text = song["notes"].replace("\n", " · ")
-                tk.Label(
-                    self._songs_frame, bg="white",
-                    text=notes_text, anchor=tk.W, justify=tk.LEFT,
-                    font=("Helvetica", sizes["notes"], "italic"),
-                    fg="#666", wraplength=320,
-                ).pack(fill=tk.X, padx=(indent * 6, 4), pady=(0, 2))
+            # Noter — vises som indrykkede labels under sangen (kun hvis
+            # show_notes-master + mindst én kategori er slået til, OG sangen
+            # rent faktisk har noter i de valgte kategorier).
+            if opts.get("show_notes", True):
+                active_cats = [
+                    f for f in NOTE_FIELDS
+                    if opts.get(f"show_{f}", f == "notes_band")
+                ]
+                if active_cats:
+                    indent = 3 + 6 if opts["show_number"] else 0
+                    for _, label, text in iter_song_notes(
+                        song, only=active_cats, with_emoji=True,
+                    ):
+                        one_line = text.replace("\n", " · ")
+                        tk.Label(
+                            self._songs_frame, bg="white",
+                            text=f"{label}: {one_line}",
+                            anchor=tk.W, justify=tk.LEFT,
+                            font=("Helvetica", sizes["notes"], "italic"),
+                            fg="#666", wraplength=320,
+                        ).pack(fill=tk.X, padx=(indent * 6, 4), pady=(0, 1))
 
         if len(items) > max_rows:
             tk.Label(
@@ -541,19 +623,32 @@ class PrintDialog(tk.Toplevel):
             ).pack(anchor=tk.W, pady=(4, 0))
 
         # Hint hvis brugeren har slået "Noter" til, men ingen sange har noter
-        # (typisk efter import fra MusicBrainz). Så ved de hvorfor de ikke
-        # ser noget — og hvordan de tilføjer noter.
+        # i de valgte kategorier. Så ved de hvorfor de ikke ser noget —
+        # og hvordan de tilføjer noter.
         if opts.get("show_notes", True):
+            active_cats = [
+                f for f in NOTE_FIELDS
+                if opts.get(f"show_{f}", f == "notes_band")
+            ]
             song_items = [it for it in items if not is_marker_item(it)]
-            has_any_notes = any(
-                (self.model.get_song(item_song_name(it)) or {}).get("notes")
+            has_any_notes = active_cats and any(
+                song_has_any_notes(
+                    self.model.get_song(item_song_name(it)) or {},
+                    only=active_cats,
+                )
                 for it in song_items
             )
             if song_items and not has_any_notes:
+                if not active_cats:
+                    hint = ("💡  Vælg mindst én noter-kategori under "
+                            "\"Hvilke noter skal med?\" for at vise noter.")
+                else:
+                    hint = ("💡  Ingen sange har noter i de valgte kategorier "
+                            "endnu — dobbeltklik en sang i setlisten for at "
+                            "tilføje noter (fx 'capo 2' under 🎸 Band).")
                 tk.Label(
                     self._songs_frame, bg="white", fg="#b88a00",
-                    text="💡  Ingen sange har noter endnu — dobbeltklik en sang "
-                         "i setlisten for at tilføje noter (fx 'capo 2', 'A-bro').",
+                    text=hint,
                     font=("Helvetica", max(8, sizes["table"] - 2), "italic"),
                     wraplength=340, justify=tk.LEFT,
                 ).pack(anchor=tk.W, pady=(6, 0), padx=2)
@@ -664,6 +759,10 @@ class SearchAllBandsDialog(tk.Toplevel):
         for bi, si, song in results:
             band_name = self.model.bands[bi]["name"]
             tag = "active" if bi == self.model.active_band else "other"
+            # Kombiner alle 4 noter-kategorier til én visnings-string
+            notes_combined = combine_song_notes(
+                song, separator=" ⏎ ", include_labels=True,
+            )
             self.tree.insert(
                 "",
                 tk.END,
@@ -672,7 +771,7 @@ class SearchAllBandsDialog(tk.Toplevel):
                     song["name"],
                     song.get("key", ""),
                     song.get("duration", ""),
-                    (song.get("notes", "") or "").replace("\n", " ⏎ "),
+                    notes_combined,
                 ),
                 tags=(tag,),
             )
@@ -1833,6 +1932,29 @@ class SetlistApp:
         )
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0))
 
+        # Toggle-række: hvilke noter-kategorier skal vises i setlist-linjen
+        notes_toggle_row = ttk.Frame(right)
+        notes_toggle_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(
+            notes_toggle_row, text="Vis noter:",
+            font=("TkDefaultFont", 9, "bold"), foreground="#666",
+        ).pack(side=tk.LEFT, padx=(2, 6))
+        self._view_notes_vars: dict[str, tk.BooleanVar] = {}
+        for field_key, emoji, _, short_label in NOTE_CATEGORIES:
+            opt_key = f"view_{field_key.replace('notes_', 'notes_')}"  # → view_notes_sound osv.
+            # NB: model.print_options bruger view_notes_sound, view_notes_lights, …
+            saved = bool(self.model.print_options.get(
+                f"view_{field_key}", True
+            ))
+            var = tk.BooleanVar(value=saved)
+            self._view_notes_vars[field_key] = var
+            ttk.Checkbutton(
+                notes_toggle_row,
+                text=f"{emoji} {short_label}",
+                variable=var,
+                command=self._on_view_notes_toggle,
+            ).pack(side=tk.LEFT, padx=(0, 2))
+
         self.set_listbox = tk.Listbox(right, selectmode=tk.SINGLE, activestyle="none")
         theme.style_listbox(self.set_listbox)
         self.set_listbox.pack(fill=tk.BOTH, expand=True)
@@ -2525,7 +2647,14 @@ class SetlistApp:
         dlg = SongDialog(self.root, title="Tilføj sang")
         if dlg.result:
             r = dlg.result
-            if not self.model.add_song(r["name"], r["duration"], r["key"], r["notes"]):
+            added = self.model.add_song(
+                r["name"], r["duration"], r["key"],
+                notes_sound=r.get("notes_sound", ""),
+                notes_lights=r.get("notes_lights", ""),
+                notes_video=r.get("notes_video", ""),
+                notes_band=r.get("notes_band", ""),
+            )
+            if not added:
                 messagebox.showinfo(
                     "Info", "Sangen findes allerede i biblioteket.", parent=self.root
                 )
@@ -2551,7 +2680,11 @@ class SetlistApp:
         if dlg.result:
             r = dlg.result
             ok = self.model.update_song(
-                song["name"], r["name"], r["duration"], r["key"], r["notes"]
+                song["name"], r["name"], r["duration"], r["key"],
+                notes_sound=r.get("notes_sound", ""),
+                notes_lights=r.get("notes_lights", ""),
+                notes_video=r.get("notes_video", ""),
+                notes_band=r.get("notes_band", ""),
             )
             if not ok:
                 messagebox.showerror(
@@ -2724,7 +2857,11 @@ class SetlistApp:
         if dlg.result:
             r = dlg.result
             ok = self.model.update_song(
-                song["name"], r["name"], r["duration"], r["key"], r["notes"]
+                song["name"], r["name"], r["duration"], r["key"],
+                notes_sound=r.get("notes_sound", ""),
+                notes_lights=r.get("notes_lights", ""),
+                notes_video=r.get("notes_video", ""),
+                notes_band=r.get("notes_band", ""),
             )
             if not ok:
                 messagebox.showerror(
@@ -2816,12 +2953,31 @@ class SetlistApp:
 
     @staticmethod
     def _lib_song_matches(song: dict, q: str) -> bool:
-        return any(
-            q in (song.get(f) or "").lower() for f in ("name", "key", "notes")
-        )
+        # Søg i alle 4 noter-kategorier + navn + toneart
+        fields = ["name", "key"] + NOTE_FIELDS
+        return any(q in (song.get(f) or "").lower() for f in fields)
+
+    def _on_view_notes_toggle(self) -> None:
+        """Brugeren har slået en noter-kategori til/fra over setlisten.
+
+        Gem valget i model.print_options så det overlever app-genstart,
+        og redraw setlist-linjen så ændringen ses straks.
+        """
+        for field_key, var in self._view_notes_vars.items():
+            self.model.print_options[f"view_{field_key}"] = bool(var.get())
+        self.refresh_setlist_view()
+        self._schedule_autosave()
+
+    def _active_view_note_cats(self) -> list[str]:
+        """Hvilke noter-kategorier er valgt vist i hovedvinduets setlist?"""
+        return [
+            field_key for field_key, var in getattr(self, "_view_notes_vars", {}).items()
+            if var.get()
+        ]
 
     def refresh_setlist_view(self) -> None:
         self.set_listbox.delete(0, tk.END)
+        active_cats = self._active_view_note_cats()
         song_num = 0
         for idx, item in enumerate(self.model.current_setlist["songs"]):
             if is_marker_item(item):
@@ -2837,20 +2993,36 @@ class SetlistApp:
                 )
             else:
                 # Almindelig sang — vis nummer, navn, toneart/længde
-                # og en lille tekst-snippet af noter (hvis der er nogen).
+                # og en lille tekst-snippet af noter (kun fra valgte kategorier).
                 song_num += 1
                 name = item_song_name(item)
                 song = self.model.get_song(name) or new_song(name)
                 extras = [x for x in (song["key"], song["duration"]) if x]
                 suffix = f"   ({' · '.join(extras)})" if extras else ""
-                # Noter som ekstra suffix — gør \n til ' · ' og forkort
-                notes = (song.get("notes") or "").strip()
+                # Noter — sløjf gennem aktive kategorier, byg én linje
+                notes_parts: list[str] = []
+                for _, _, text in iter_song_notes(
+                    song, only=active_cats, with_emoji=False,
+                ):
+                    one_line = text.replace("\n", " ")
+                    notes_parts.append(one_line)
                 notes_suffix = ""
-                if notes:
-                    one_line = notes.replace("\n", " · ")
-                    if len(one_line) > 50:
-                        one_line = one_line[:47] + "…"
-                    notes_suffix = f"   💬 {one_line}"
+                if notes_parts:
+                    # Vis kategori-emojis så det er nemt at se hvad er hvad
+                    parts_with_emoji: list[str] = []
+                    for field_key, label, text in iter_song_notes(
+                        song, only=active_cats, with_emoji=True,
+                    ):
+                        # Brug bare emojien, ikke fulde label — sparer plads
+                        emoji = label.split(" ", 1)[0]
+                        one_line = text.replace("\n", " ")
+                        if len(one_line) > 30:
+                            one_line = one_line[:27] + "…"
+                        parts_with_emoji.append(f"{emoji} {one_line}")
+                    combined = "   ".join(parts_with_emoji)
+                    if len(combined) > 80:
+                        combined = combined[:77] + "…"
+                    notes_suffix = f"   {combined}"
                 self.set_listbox.insert(
                     tk.END, f"{song_num:>2}.  {song['name']}{suffix}{notes_suffix}"
                 )

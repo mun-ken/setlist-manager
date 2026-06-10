@@ -51,7 +51,12 @@ def test_song_fields_preserved() -> None:
     m2.load_from_path(p)
     s = m2.get_song("Test")
     assert s and s["duration"] == "3:21" and s["key"] == "Am"
-    assert s["notes"] == "Line 1\nLine 2"
+    # Legacy `notes=` keyword går nu i `notes_band` (mest oplagt for musikere)
+    assert s["notes_band"] == "Line 1\nLine 2"
+    # Andre kategorier er tomme
+    assert s["notes_sound"] == ""
+    assert s["notes_lights"] == ""
+    assert s["notes_video"] == ""
     print("  song fields OK")
 
 
@@ -217,13 +222,28 @@ def test_print_options_default() -> None:
         "show_key",
         "show_duration",
         "show_notes",
+        # 4 noter-kategorier (kun band default-til på print)
+        "show_notes_sound",
+        "show_notes_lights",
+        "show_notes_video",
+        "show_notes_band",
+        # 4 view-toggles (hovedvinduets setlist-linje)
+        "view_notes_sound",
+        "view_notes_lights",
+        "view_notes_video",
+        "view_notes_band",
         # Footer + sektioner
         "show_total_time",
         "show_markers",
     }
-    # Alle bool-keys default til True
+    # De fleste bool-keys default til True. Undtagelser: print-toggles for
+    # lyd/lys/video — bandet vil normalt kun have band-noter på papir.
+    defaults_false = {"show_notes_sound", "show_notes_lights", "show_notes_video"}
     for k in expected_bool_keys:
-        assert opts.get(k) is True, f"{k} skal default til True"
+        if k in defaults_false:
+            assert opts.get(k) is False, f"{k} skal default til False"
+        else:
+            assert opts.get(k) is True, f"{k} skal default til True"
     # Plus font_size (string)
     assert opts.get("font_size") in ("xsmall", "small", "medium", "large", "xlarge")
     # Ingen ukendte keys
@@ -397,7 +417,22 @@ def test_duration_helpers() -> None:
 
 def test_new_song_factory_strips_whitespace() -> None:
     s = new_song("  Hey  ", duration="  3:00 ", key="  G ", notes=" hi ")
-    assert s == {"name": "Hey", "duration": "3:00", "key": "G", "notes": "hi"}
+    # `notes=` (positionel/legacy) går nu i `notes_band` — bagudkompatibel
+    assert s == {
+        "name": "Hey",
+        "duration": "3:00",
+        "key": "G",
+        "notes_sound": "",
+        "notes_lights": "",
+        "notes_video": "",
+        "notes_band": "hi",
+    }
+    # Verificer at man også kan sætte hver kategori direkte
+    s2 = new_song("X", notes_sound="s", notes_lights="l", notes_video="v", notes_band="b")
+    assert s2["notes_sound"] == "s"
+    assert s2["notes_lights"] == "l"
+    assert s2["notes_video"] == "v"
+    assert s2["notes_band"] == "b"
     print("  factory whitespace OK")
 
 
@@ -981,7 +1016,8 @@ def test_regression_notes_persist_after_edit() -> None:
     m = SetlistModel()
     m.add_song("Sang A", duration="3:00", key="C")
     m.add_to_setlist_by_index(0)
-    # Brugeren dobbeltklikker → ændrer noter
+    # Brugeren dobbeltklikker → ændrer noter (legacy `notes=` keyword
+    # går i `notes_band` for bagudkompatibilitet)
     ok = m.update_song(
         original_name="Sang A",
         name="Sang A",
@@ -990,16 +1026,16 @@ def test_regression_notes_persist_after_edit() -> None:
         notes="Capo 3 · spil softere på outro",
     )
     assert ok
-    # Verificer at noterne nu er på sangen
-    assert m.get_song("Sang A")["notes"] == "Capo 3 · spil softere på outro"
+    # Verificer at noterne nu er på sangen i band-feltet
+    assert m.get_song("Sang A")["notes_band"] == "Capo 3 · spil softere på outro"
     # Verificer at noterne overlever save/load
     with tempfile.TemporaryDirectory() as td:
         p = pathlib.Path(td) / "test.json"
         m.save_to_path(str(p))
         m2 = SetlistModel()
         m2.load_from_path(str(p))
-        assert m2.get_song("Sang A")["notes"] == "Capo 3 · spil softere på outro"
-    # Og at noterne er med i HTML
+        assert m2.get_song("Sang A")["notes_band"] == "Capo 3 · spil softere på outro"
+    # Og at noterne er med i HTML (band default-til i print_options)
     opts = default_print_options()
     html = m.generate_html("Test", opts)
     assert "Capo 3" in html
@@ -2479,7 +2515,11 @@ def test_web_server_state_snapshot_basic() -> None:
     assert song["type"] == "song"
     assert song["name"] == "Test Sang"
     assert song["key"] == "G"
-    assert song["notes"] == "Husk capo"
+    # 4 separate noter-felter — legacy `notes=` gik i band
+    assert song["notes_band"] == "Husk capo"
+    assert song["notes_sound"] == ""
+    assert song["notes_lights"] == ""
+    assert song["notes_video"] == ""
     assert song["is_current"] is True
     print("  web_server state snapshot OK")
 
@@ -3305,6 +3345,317 @@ def test_ndi_broadcaster_frame_listener_can_be_removed() -> None:
 
 
 # ===========================================================================
+# v1.7.0: 4 separate noter-kategorier pr. sang
+# ===========================================================================
+def test_v170_song_has_four_note_fields() -> None:
+    """En sang skal have 4 separate noter-felter: lyd, lys, video, band."""
+    from setlist_model import new_song, NOTE_FIELDS
+
+    assert NOTE_FIELDS == ["notes_sound", "notes_lights", "notes_video", "notes_band"]
+    s = new_song("X")
+    for field in NOTE_FIELDS:
+        assert field in s, f"sang mangler {field}"
+        assert s[field] == ""
+    print("  v1.7.0: 4 noter-felter på sang OK")
+
+
+def test_v170_migration_old_notes_goes_to_band() -> None:
+    """Gamle JSON-filer med kun 'notes' skal migreres til 'notes_band'."""
+    from setlist_model import SetlistModel
+
+    # Simuler en gammel sangstruktur (v1.6.x)
+    old_data = {
+        "schema_version": 3,
+        "bands": [{
+            "name": "Test Band",
+            "library": [{
+                "name": "Gammel Sang",
+                "key": "C",
+                "duration": "3:00",
+                "notes": "Capo 2 · spil softere",
+            }],
+            "setlists": [{
+                "name": "S1",
+                "songs": ["Gammel Sang"],
+                "modified_at": "",
+            }],
+            "active_setlist": 0,
+            "logo_base64": "",
+        }],
+        "active_band": 0,
+    }
+    m = SetlistModel()
+    m.from_dict(old_data)
+    s = m.get_song("Gammel Sang")
+    assert s is not None
+    assert s["notes_band"] == "Capo 2 · spil softere"
+    assert s["notes_sound"] == ""
+    assert s["notes_lights"] == ""
+    assert s["notes_video"] == ""
+    # `notes`-feltet eksisterer ikke længere
+    assert "notes" not in s
+    print("  v1.7.0: gamle noter migreres til notes_band OK")
+
+
+def test_v170_can_set_each_note_category_independently() -> None:
+    """Hver af de 4 kategorier kan sættes uafhængigt via update_song."""
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("X", "3:00", "C")
+    ok = m.update_song(
+        "X", "X", "3:00", "C",
+        notes_sound="reverb mere",
+        notes_lights="blå farve",
+        notes_video="solo-zoom",
+        notes_band="capo 3",
+    )
+    assert ok
+    s = m.get_song("X")
+    assert s["notes_sound"] == "reverb mere"
+    assert s["notes_lights"] == "blå farve"
+    assert s["notes_video"] == "solo-zoom"
+    assert s["notes_band"] == "capo 3"
+    print("  v1.7.0: 4 kategorier sættes uafhængigt OK")
+
+
+def test_v170_iter_song_notes_skips_empty() -> None:
+    """iter_song_notes skal kun returnere kategorier med indhold."""
+    from setlist_model import iter_song_notes, new_song
+
+    s = new_song("X", notes_sound="lyd", notes_band="band")
+    entries = iter_song_notes(s)
+    assert len(entries) == 2
+    keys = [e[0] for e in entries]
+    assert "notes_sound" in keys
+    assert "notes_band" in keys
+    assert "notes_lights" not in keys
+    assert "notes_video" not in keys
+
+
+def test_v170_iter_song_notes_respects_only_filter() -> None:
+    """`only` parameter skal begrænse hvilke kategorier returneres."""
+    from setlist_model import iter_song_notes, new_song
+
+    s = new_song("X", notes_sound="lyd", notes_lights="lys", notes_band="band")
+    entries = iter_song_notes(s, only=["notes_sound", "notes_band"])
+    assert len(entries) == 2
+    keys = [e[0] for e in entries]
+    assert "notes_sound" in keys
+    assert "notes_band" in keys
+    assert "notes_lights" not in keys
+
+
+def test_v170_print_html_respects_category_toggles() -> None:
+    """generate_html må kun vise kategorier hvor show_notes_<kat> er True."""
+    from setlist_model import SetlistModel, default_print_options
+
+    m = SetlistModel()
+    m.add_song("Test")
+    m.update_song(
+        "Test", "Test", "", "",
+        notes_sound="LYD-HEMMELIG",
+        notes_lights="LYS-HEMMELIG",
+        notes_video="VIDEO-HEMMELIG",
+        notes_band="BAND-HEMMELIG",
+    )
+    m.current_setlist["songs"] = ["Test"]
+
+    # Default: kun band vises
+    opts = default_print_options()
+    html = m.generate_html("Test print", opts)
+    assert "BAND-HEMMELIG" in html
+    assert "LYD-HEMMELIG" not in html
+    assert "LYS-HEMMELIG" not in html
+    assert "VIDEO-HEMMELIG" not in html
+
+    # Slå lyd og video til
+    opts["show_notes_sound"] = True
+    opts["show_notes_video"] = True
+    html2 = m.generate_html("Test print", opts)
+    assert "BAND-HEMMELIG" in html2
+    assert "LYD-HEMMELIG" in html2
+    assert "VIDEO-HEMMELIG" in html2
+    assert "LYS-HEMMELIG" not in html2
+
+    # Master-toggle: hvis show_notes=False → ingenting
+    opts["show_notes"] = False
+    html3 = m.generate_html("Test print", opts)
+    assert "BAND-HEMMELIG" not in html3
+    assert "LYD-HEMMELIG" not in html3
+    print("  v1.7.0: print HTML respekterer kategori-toggles OK")
+
+
+def test_v170_print_html_has_category_labels() -> None:
+    """Hver noter-kategori i print skal have en label (fx 🔊 Lyd)."""
+    from setlist_model import SetlistModel, default_print_options
+
+    m = SetlistModel()
+    m.add_song("Test")
+    m.update_song(
+        "Test", "Test", "", "",
+        notes_sound="reverb",
+        notes_band="capo",
+    )
+    m.current_setlist["songs"] = ["Test"]
+    opts = default_print_options()
+    opts["show_notes_sound"] = True
+    html = m.generate_html("X", opts)
+    # Begge labels skal være i HTML — som vist for hver kategori
+    assert "Lyd" in html
+    assert "Band" in html
+    assert "reverb" in html
+    assert "capo" in html
+
+
+def test_v170_search_finds_in_all_note_categories() -> None:
+    """Søgning skal kigge i alle 4 noter-kategorier."""
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("A")
+    m.update_song("A", "A", "", "", notes_sound="REVERB-XYZ")
+    m.add_song("B")
+    m.update_song("B", "B", "", "", notes_lights="FAREN-XYZ")
+    m.add_song("C")
+    m.update_song("C", "C", "", "", notes_video="ZOOMEN-XYZ")
+    m.add_song("D")
+    m.update_song("D", "D", "", "", notes_band="CAPO-XYZ")
+
+    results = m.search_songs("XYZ")
+    assert len(results) == 4, f"forventede 4, fik {len(results)}"
+
+    # Mere specifik søgning
+    only_a = m.search_songs("REVERB")
+    assert len(only_a) == 1
+    assert only_a[0][2]["name"] == "A"
+
+
+def test_v170_copy_song_between_bands_preserves_all_notes() -> None:
+    """copy_song_to_current_band skal kopiere alle 4 noter-kategorier."""
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_band("Band B")
+    m.set_active_band(0)
+    m.add_song("Shared")
+    m.update_song(
+        "Shared", "Shared", "3:00", "G",
+        notes_sound="s1", notes_lights="s2",
+        notes_video="s3", notes_band="s4",
+    )
+    m.set_active_band(1)
+    ok = m.copy_song_to_current_band(0, 0)
+    assert ok
+    s = m.get_song("Shared")
+    assert s["duration"] == "3:00"
+    assert s["key"] == "G"
+    assert s["notes_sound"] == "s1"
+    assert s["notes_lights"] == "s2"
+    assert s["notes_video"] == "s3"
+    assert s["notes_band"] == "s4"
+    print("  v1.7.0: kopier sang bevarer alle 4 kategorier OK")
+
+
+def test_v170_web_snapshot_has_all_four_notes() -> None:
+    """build_state_snapshot returnerer alle 4 noter-kategorier pr. sang."""
+    from web_server import build_state_snapshot
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("Test")
+    m.update_song(
+        "Test", "Test", "", "",
+        notes_sound="lyd1", notes_lights="lys1",
+        notes_video="vid1", notes_band="band1",
+    )
+    m.current_setlist["songs"] = ["Test"]
+
+    state = build_state_snapshot(m, 0)
+    song = state["songs"][0]
+    assert song["notes_sound"] == "lyd1"
+    assert song["notes_lights"] == "lys1"
+    assert song["notes_video"] == "vid1"
+    assert song["notes_band"] == "band1"
+
+
+def test_v170_api_current_includes_all_four_categories() -> None:
+    """/api/current skal sende alle 4 noter-felter (Companion-venligt)."""
+    import json
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("Test")
+    m.update_song(
+        "Test", "Test", "3:00", "G",
+        notes_sound="reverb", notes_lights="blå",
+        notes_video="zoom", notes_band="capo",
+    )
+    m.current_setlist["songs"] = ["Test"]
+
+    ws = WebServer(m, port=18796)
+    try:
+        ws.start()
+        port = ws.get_port()
+        with urllib.request.urlopen(f"http://localhost:{port}/api/current", timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        assert data["notes_sound"] == "reverb"
+        assert data["notes_lights"] == "blå"
+        assert data["notes_video"] == "zoom"
+        assert data["notes_band"] == "capo"
+        # Bagudkompatibelt: 'notes' er kombineret streng
+        assert "capo" in data["notes"]
+        assert "reverb" in data["notes"]
+    finally:
+        ws.stop()
+    print("  v1.7.0: /api/current sender alle 4 kategorier OK")
+
+
+def test_v170_notes_view_has_toggle_pills() -> None:
+    """/notes-siden skal indeholde 4 toggle-piller for noter-kategorier."""
+    import urllib.request
+    from web_server import WebServer
+    from setlist_model import SetlistModel
+
+    m = SetlistModel()
+    m.add_song("X")
+    m.current_setlist["songs"] = ["X"]
+    ws = WebServer(m, port=18797)
+    try:
+        ws.start()
+        port = ws.get_port()
+        with urllib.request.urlopen(f"http://localhost:{port}/notes", timeout=2) as r:
+            body = r.read().decode("utf-8")
+        # Skal indeholde toggle-piller med data-cat
+        assert 'data-cat="notes_sound"' in body
+        assert 'data-cat="notes_lights"' in body
+        assert 'data-cat="notes_video"' in body
+        assert 'data-cat="notes_band"' in body
+        # localStorage-key skal være versioneret
+        assert "setlist_notes_visible_v1" in body
+    finally:
+        ws.stop()
+    print("  v1.7.0: /notes har 4 toggle-piller OK")
+
+
+def test_v170_combine_song_notes_joins_with_separator() -> None:
+    """combine_song_notes laver én streng ud af valgte noter."""
+    from setlist_model import combine_song_notes, new_song
+
+    s = new_song("X", notes_sound="lyd", notes_band="band")
+    combined = combine_song_notes(s, separator=" | ", include_labels=False)
+    # Rækkefølgen er garanteret som NOTE_CATEGORIES: sound før band
+    assert combined == "lyd | band"
+
+    # Med labels
+    combined_labeled = combine_song_notes(s, separator=" | ", include_labels=True)
+    assert "🔊 Lyd: lyd" in combined_labeled
+    assert "🎸 Band: band" in combined_labeled
+
+
+# ===========================================================================
 def run_all() -> None:
     tests = [
         test_basic_save_load_roundtrip,
@@ -3441,6 +3792,20 @@ def run_all() -> None:
         test_ndi_broadcaster_set_current_index_skips_markers,
         test_ndi_broadcaster_stop_is_idempotent,
         test_ndi_broadcaster_frame_listener_can_be_removed,
+        # v1.7.0: 4 noter-kategorier
+        test_v170_song_has_four_note_fields,
+        test_v170_migration_old_notes_goes_to_band,
+        test_v170_can_set_each_note_category_independently,
+        test_v170_iter_song_notes_skips_empty,
+        test_v170_iter_song_notes_respects_only_filter,
+        test_v170_print_html_respects_category_toggles,
+        test_v170_print_html_has_category_labels,
+        test_v170_search_finds_in_all_note_categories,
+        test_v170_copy_song_between_bands_preserves_all_notes,
+        test_v170_web_snapshot_has_all_four_notes,
+        test_v170_api_current_includes_all_four_categories,
+        test_v170_notes_view_has_toggle_pills,
+        test_v170_combine_song_notes_joins_with_separator,
     ]
     print(f"Running {len(tests)} tests...")
     for t in tests:

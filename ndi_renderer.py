@@ -29,7 +29,13 @@ except ImportError:
     ImageFont = None  # type: ignore[assignment]
     PIL_AVAILABLE = False
 
-from setlist_model import is_marker_item, item_marker_label, item_song_name, new_song
+from setlist_model import (
+    is_marker_item,
+    item_marker_label,
+    item_song_name,
+    iter_song_notes,
+    new_song,
+)
 
 
 # ===========================================================================
@@ -187,7 +193,9 @@ def render_notes_frame(
         PIL.Image i RGBA mode, eller None hvis PIL ikke er installeret.
 
     Parameters:
-        current_song: dict med 'name', 'key', 'duration', 'notes' — eller None
+        current_song: dict med 'name', 'key', 'duration' og 4 noter-felter
+                      ('notes_sound', 'notes_lights', 'notes_video',
+                      'notes_band') — eller None
         next_song:    samme, eller None hvis sidste sang
         setlist_name: navn vist øverst (fx "ØVE DAG 1")
         song_position: fx "Sang 5 af 12"
@@ -342,28 +350,80 @@ def _draw_song_section(
         cursor_y += int(height_ref * 0.01)
 
     # Noter (multi-line med wrap) — GUL HIGHLIGHTER så de er let synlige
-    notes = (song.get("notes") or "").strip()
-    if notes:
-        notes_size = max(16, int(height_ref * (0.028 if is_current else 0.022)))
+    # 4 separate kategorier (lyd, lys, video, band) renderes som adskilte
+    # blokke med deres kategori-label, så alle kan se hvad der gælder dem.
+    note_entries = iter_song_notes(song, with_emoji=True)
+    if note_entries:
+        notes_size = max(16, int(height_ref * (0.026 if is_current else 0.020)))
         notes_font = _get_font(notes_size)
-        notes_lines = _wrap_text(draw, notes, notes_font, inner_w - int(height_ref * 0.025))
-        # Hvor mange linjer er der plads til?
-        remaining_h = (y + h) - cursor_y - int(height_ref * 0.015)
-        line_h = int(notes_size * 1.35)
-        # Plads til highlighter-padding + evt. truncation indikator
-        pad_v = int(notes_size * 0.4)
-        max_lines = max(1, (remaining_h - 2 * pad_v) // line_h)
-        visible_lines = notes_lines[:max_lines]
-        truncated = len(notes_lines) > max_lines
+        label_size = max(12, int(notes_size * 0.75))
+        label_font = _get_font(label_size, "bold")
 
-        # === Gul højlighter-boks bag noterne ===
-        if visible_lines:
-            box_h = line_h * len(visible_lines) + 2 * pad_v
-            pad_h = int(height_ref * 0.012)
+        # Plads vi har til ALLE noter samlet
+        remaining_h = (y + h) - cursor_y - int(height_ref * 0.015)
+        line_h = int(notes_size * 1.30)
+        label_h = int(label_size * 1.20)
+        pad_v = int(notes_size * 0.35)
+        gap_between = int(height_ref * 0.008)
+        pad_h = int(height_ref * 0.012)
+
+        # Først: regn ud hvor mange linjer hver note får (proportionelt)
+        # for at de alle passer indenfor remaining_h.
+        wrapped_per_entry: list[list[str]] = []
+        for _, _, text in note_entries:
+            wrapped = _wrap_text(
+                draw, text, notes_font,
+                inner_w - int(height_ref * 0.025),
+            )
+            wrapped_per_entry.append(wrapped)
+
+        # Bestem max linjer pr. note ud fra resterende plads
+        n_notes = len(note_entries)
+        # Per-note fixed overhead: label + padding + spacing mellem
+        per_note_overhead = label_h + 2 * pad_v + gap_between
+        avail_for_text = remaining_h - n_notes * per_note_overhead
+        if avail_for_text < line_h:
+            # For lidt plads — vis bare første note's første linje
+            avail_for_text = line_h
+        # Fordel jævnt — men ikke flere end nødvendigt for hver note
+        max_per_note = max(1, avail_for_text // (n_notes * line_h))
+
+        # Hvis nogen note har færre linjer end max → giv overskuddet til andre
+        unused = 0
+        adjusted_lines: list[int] = []
+        for wrapped in wrapped_per_entry:
+            wanted = len(wrapped)
+            give = min(wanted, max_per_note)
+            adjusted_lines.append(give)
+            unused += max(0, max_per_note - wanted)
+        # Anden runde: del unused-linjer ud til noter der vil have mere
+        if unused > 0:
+            for i, wrapped in enumerate(wrapped_per_entry):
+                if unused <= 0:
+                    break
+                wanted = len(wrapped)
+                if adjusted_lines[i] < wanted:
+                    give = min(wanted - adjusted_lines[i], unused)
+                    adjusted_lines[i] += give
+                    unused -= give
+
+        # Render hver note som sin egen gule blok
+        for entry_idx, ((_, label, _), wrapped) in enumerate(
+            zip(note_entries, wrapped_per_entry)
+        ):
+            visible_lines = wrapped[: adjusted_lines[entry_idx]]
+            if not visible_lines:
+                visible_lines = wrapped[:1] if wrapped else []
+            if not visible_lines:
+                continue
+            truncated = len(wrapped) > len(visible_lines)
+
+            block_text_h = line_h * len(visible_lines)
+            block_h = label_h + block_text_h + 2 * pad_v
             box_x0 = inner_x - pad_h
             box_y0 = cursor_y - pad_v
             box_x1 = inner_x + inner_w
-            box_y1 = box_y0 + box_h
+            box_y1 = box_y0 + block_h
 
             # Fyld + kant — gul highlighter look
             try:
@@ -375,7 +435,6 @@ def _draw_song_section(
                     width=max(2, int(height_ref * 0.003)),
                 )
             except AttributeError:
-                # PIL < 8.2 har ikke rounded_rectangle — fald tilbage
                 draw.rectangle(
                     [box_x0, box_y0, box_x1, box_y1],
                     fill=NotesColors.NOTES_HIGHLIGHT_BG,
@@ -383,23 +442,30 @@ def _draw_song_section(
                     width=max(2, int(height_ref * 0.003)),
                 )
 
-            # Mørk tekst oven på den gule baggrund
+            # Label: "🔊 LYD" osv. — fed lille linje øverst i blokken
+            draw.text(
+                (inner_x, cursor_y), label.upper(),
+                fill=NotesColors.NOTES_HIGHLIGHT_FG, font=label_font,
+            )
+            line_y = cursor_y + label_h
+
             for line in visible_lines:
                 draw.text(
-                    (inner_x, cursor_y), line,
+                    (inner_x, line_y), line,
                     fill=NotesColors.NOTES_HIGHLIGHT_FG, font=notes_font,
                 )
-                cursor_y += line_h
+                line_y += line_h
 
-            # "..." hvis vi måtte trunkere
             if truncated:
                 draw.text(
-                    (inner_x, cursor_y - line_h + int(line_h * 0.5)),
+                    (inner_x, line_y - int(line_h * 0.6)),
                     "...",
                     fill=NotesColors.NOTES_HIGHLIGHT_FG, font=notes_font,
                 )
+
+            cursor_y = box_y1 + gap_between
     else:
-        # Ingen noter — vis bare en lille placeholder (samme som før)
+        # Ingen noter overhovedet — vis bare en lille placeholder
         ph_size = max(14, int(height_ref * 0.02))
         ph_font = _get_font(ph_size, "italic")
         draw.text(

@@ -41,6 +41,8 @@ from typing import Callable, List, Optional
 from urllib.parse import urlparse
 
 from setlist_model import (
+    NOTE_CATEGORIES,
+    NOTE_FIELDS,
     SetlistModel,
     is_marker_item,
     item_marker_label,
@@ -90,7 +92,11 @@ def build_state_snapshot(
                 "name": name,
                 "key": song.get("key", ""),
                 "duration": song.get("duration", ""),
-                "notes": song.get("notes", ""),
+                # 4 separate noter-kategorier — klienten vælger hvilke vises
+                "notes_sound": song.get("notes_sound", ""),
+                "notes_lights": song.get("notes_lights", ""),
+                "notes_video": song.get("notes_video", ""),
+                "notes_band": song.get("notes_band", ""),
                 "is_current": is_current,
             })
 
@@ -467,6 +473,40 @@ _NOTES_HTML = """<!DOCTYPE html>
     padding: 4px 10px;
     border: 1px solid #2c2c2e; border-radius: 6px;
   }
+
+  /* Toggle-bar — vælg hvilke noter-kategorier der vises */
+  .notes-toggle-bar {
+    background: #0e0e10;
+    padding: 8px 12px;
+    border-bottom: 1px solid #1c1c1e;
+    display: flex; flex-wrap: wrap; gap: 6px;
+    align-items: center; justify-content: center;
+    position: sticky; top: 0; z-index: 9;
+  }
+  .notes-toggle-bar .label {
+    color: #6e6e73; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin-right: 4px;
+  }
+  .toggle-pill {
+    user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
+    background: #1c1c1e;
+    border: 1.5px solid #2c2c2e;
+    color: #8e8e93;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 13px; font-weight: 600;
+    transition: all 0.15s;
+  }
+  .toggle-pill.active {
+    background: rgba(0,217,108,0.15);
+    border-color: #00d96c;
+    color: #00d96c;
+  }
+  .toggle-pill:active { transform: scale(0.95); }
+
   .main { padding: 16px; max-width: 900px; margin: 0 auto; }
 
   /* Sang-kort — matcher NDI renderer farver */
@@ -512,20 +552,30 @@ _NOTES_HTML = """<!DOCTYPE html>
   }
   .card.next .meta { font-size: 13px; }
 
-  /* Noter — gul highlighter ligesom Stage Mode + NDI */
+  /* Noter — gul highlighter ligesom Stage Mode + NDI.
+     Hver af de 4 kategorier (lyd, lys, video, band) er sin egen blok. */
+  .notes-stack { display: flex; flex-direction: column; gap: 8px; }
   .notes-box {
     background: #fde047;
     color: #1a1a1a;
     border-left: 5px solid #ca8a04;
     border-radius: 10px;
-    padding: 14px 18px;
+    padding: 12px 16px;
     font-size: 16px;
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
   }
-  .card.next .notes-box { font-size: 14px; padding: 10px 14px; }
-  .notes-box .icon { font-size: 17px; margin-right: 4px; }
+  .notes-box .cat-label {
+    display: block;
+    font-size: 11px; font-weight: 800;
+    letter-spacing: 1px; text-transform: uppercase;
+    color: #6b4f00;
+    margin-bottom: 4px;
+  }
+  .notes-box .cat-text { display: block; }
+  .card.next .notes-box { font-size: 14px; padding: 8px 12px; }
+  .card.next .notes-box .cat-label { font-size: 10px; }
 
   .empty-notes {
     color: #48484a; font-style: italic; font-size: 14px;
@@ -567,6 +617,13 @@ _NOTES_HTML = """<!DOCTYPE html>
   <div class="position" id="position">{{position}}</div>
   <a class="home-link" href="/">← Skift</a>
 </div>
+<div class="notes-toggle-bar" id="toggle-bar">
+  <span class="label">Vis noter:</span>
+  <button class="toggle-pill" data-cat="notes_sound">🔊 Lyd</button>
+  <button class="toggle-pill" data-cat="notes_lights">💡 Lys</button>
+  <button class="toggle-pill" data-cat="notes_video">🎬 Video</button>
+  <button class="toggle-pill" data-cat="notes_band">🎸 Band</button>
+</div>
 <div class="main" id="main">
   <div id="current-slot">{{current_card}}</div>
   <div id="next-slot">{{next_card}}</div>
@@ -574,6 +631,52 @@ _NOTES_HTML = """<!DOCTYPE html>
 <div class="reconnecting" id="reconnect">Genopretter forbindelse…</div>
 <script>
 (function() {
+  // === Kategori-konfiguration ===
+  const NOTE_CATEGORIES = [
+    { key: "notes_sound",  emoji: "🔊", label: "Lyd"   },
+    { key: "notes_lights", emoji: "💡", label: "Lys"   },
+    { key: "notes_video",  emoji: "🎬", label: "Video" },
+    { key: "notes_band",   emoji: "🎸", label: "Band"  },
+  ];
+  const STORAGE_KEY = "setlist_notes_visible_v1";
+
+  // Hvilke kategorier er slået til? (per-device localStorage)
+  function loadVisibleCats() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr);
+      }
+    } catch (e) {}
+    // Default: alle 4 til
+    return new Set(NOTE_CATEGORIES.map(c => c.key));
+  }
+  function saveVisibleCats(set) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify([...set]));
+    } catch (e) {}
+  }
+  let visibleCats = loadVisibleCats();
+
+  // Toggle-piller bind
+  let lastState = null;
+  document.querySelectorAll(".toggle-pill").forEach(btn => {
+    const cat = btn.getAttribute("data-cat");
+    if (visibleCats.has(cat)) btn.classList.add("active");
+    btn.addEventListener("click", () => {
+      if (visibleCats.has(cat)) {
+        visibleCats.delete(cat);
+        btn.classList.remove("active");
+      } else {
+        visibleCats.add(cat);
+        btn.classList.add("active");
+      }
+      saveVisibleCats(visibleCats);
+      if (lastState) render(lastState);
+    });
+  });
+
   let evt = null;
   const reconnectEl = document.getElementById("reconnect");
   const positionEl = document.getElementById("position");
@@ -586,6 +689,32 @@ _NOTES_HTML = """<!DOCTYPE html>
     })[c]);
   }
 
+  function renderNotesStack(song, isCurrent) {
+    // Returnerer HTML for de noter der skal vises ifølge toggle-state
+    const blocks = [];
+    for (const cat of NOTE_CATEGORIES) {
+      if (!visibleCats.has(cat.key)) continue;
+      const text = (song[cat.key] || "").trim();
+      if (!text) continue;
+      blocks.push(`
+        <div class="notes-box">
+          <span class="cat-label">${cat.emoji} ${cat.label}</span>
+          <span class="cat-text">${escapeHtml(text)}</span>
+        </div>`);
+    }
+    if (blocks.length > 0) {
+      return `<div class="notes-stack">${blocks.join("")}</div>`;
+    }
+    if (isCurrent) {
+      // Hjælp brugeren forstå hvad der mangler
+      if (visibleCats.size === 0) {
+        return `<div class="empty-notes">(slå mindst én kategori til ovenfor)</div>`;
+      }
+      return `<div class="empty-notes">(ingen noter til denne sang)</div>`;
+    }
+    return "";
+  }
+
   function renderSongCard(song, isCurrent) {
     if (!song) {
       if (isCurrent) {
@@ -596,23 +725,17 @@ _NOTES_HTML = """<!DOCTYPE html>
     const cls = isCurrent ? "card current" : "card next";
     const label = isCurrent ? "▶ Nuværende" : "⏭ Næste sang";
     const meta = [song.key, song.duration].filter(Boolean).join("   ·   ");
-    const notes = (song.notes || "").trim();
-    let notesHtml = "";
-    if (notes) {
-      notesHtml = `<div class="notes-box"><span class="icon">📝</span>${escapeHtml(notes)}</div>`;
-    } else if (isCurrent) {
-      notesHtml = `<div class="empty-notes">(ingen noter til denne sang)</div>`;
-    }
     return `
       <div class="${cls}">
         <div class="label">${label}</div>
         <div class="name">${escapeHtml(song.name)}</div>
         ${meta ? `<div class="meta">${escapeHtml(meta)}</div>` : ""}
-        ${notesHtml}
+        ${renderNotesStack(song, isCurrent)}
       </div>`;
   }
 
   function render(state) {
+    lastState = state;
     // Position-tekst (fx "Sang 6 af 19")
     if (state.current_num && state.total_songs) {
       positionEl.textContent = `Sang ${state.current_num} af ${state.total_songs}`;
@@ -651,7 +774,11 @@ def _render_position_text(state: dict) -> str:
 
 
 def _render_song_card(song: Optional[dict], *, is_current: bool) -> str:
-    """Server-render et sang-kort (så side virker uden JS også)."""
+    """Server-render et sang-kort (så side virker uden JS også).
+
+    Server-siden viser ALLE 4 noter-kategorier som default. Når JS loader,
+    overskriver klienten dem ifølge brugerens localStorage-præference.
+    """
     if song is None:
         if is_current:
             return '<div class="end-of-set">— Ingen sang valgt —</div>'
@@ -663,12 +790,21 @@ def _render_song_card(song: Optional[dict], *, is_current: bool) -> str:
     meta = "   ·   ".join(meta_parts)
     meta_html = f'<div class="meta">{html.escape(meta)}</div>' if meta else ""
 
-    notes = (song.get("notes") or "").strip()
-    if notes:
-        notes_html = (
-            f'<div class="notes-box"><span class="icon">📝</span>'
-            f'{html.escape(notes)}</div>'
+    # Render hver ikke-tom noter-kategori som sin egen blok
+    blocks: List[str] = []
+    for field_key, emoji, full_label, _ in NOTE_CATEGORIES:
+        text = (song.get(field_key) or "").strip()
+        if not text:
+            continue
+        blocks.append(
+            f'<div class="notes-box">'
+            f'<span class="cat-label">{emoji} {html.escape(full_label)}</span>'
+            f'<span class="cat-text">{html.escape(text)}</span>'
+            f'</div>'
         )
+
+    if blocks:
+        notes_html = f'<div class="notes-stack">{"".join(blocks)}</div>'
     elif is_current:
         notes_html = '<div class="empty-notes">(ingen noter til denne sang)</div>'
     else:
@@ -709,12 +845,20 @@ def _render_initial_rows(state: dict, view: str) -> str:
             )
             notes_html = ""
             if view == "notes":
-                notes = item.get("notes", "").strip()
-                if notes:
+                # 4 kategorier — render hver ikke-tom som en lille tape-strip
+                blocks: List[str] = []
+                for field_key, emoji, full_label, _ in NOTE_CATEGORIES:
+                    text = (item.get(field_key) or "").strip()
+                    if not text:
+                        continue
+                    blocks.append(
+                        f'<div class="notes-block">'
+                        f'<strong>{emoji} {html.escape(full_label)}:</strong> '
+                        f'{html.escape(text)}</div>'
+                    )
+                if blocks:
                     notes_html = (
-                        '<div style="flex-basis:100%">'
-                        '<div class="notes-block">📝 '
-                        f'{html.escape(notes)}</div></div>'
+                        '<div style="flex-basis:100%">' + "".join(blocks) + "</div>"
                     )
                 elif item["idx"] == state["current_idx"]:
                     notes_html = (
@@ -948,7 +1092,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "name": cur.get("name", ""),
             "key": cur.get("key", ""),
             "duration": cur.get("duration", ""),
-            "notes": cur.get("notes", ""),
+            # 4 noter-kategorier — Companion kan plotte hver enkelt
+            "notes_sound": cur.get("notes_sound", ""),
+            "notes_lights": cur.get("notes_lights", ""),
+            "notes_video": cur.get("notes_video", ""),
+            "notes_band": cur.get("notes_band", ""),
+            # Bagudkompatibel: kombineret streng for ældre Companion-setups
+            "notes": "  ·  ".join(filter(None, (
+                cur.get("notes_band", ""),
+                cur.get("notes_sound", ""),
+                cur.get("notes_lights", ""),
+                cur.get("notes_video", ""),
+            ))),
             "num": state.get("current_num", 0),
             "total": state.get("total_songs", 0),
             "next_name": nxt.get("name", "") if nxt else "",
